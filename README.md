@@ -14,3 +14,13 @@ For our system, we don't need all the 6 degrees of freedom, but only two. I deci
 <img width="1536" height="2040" alt="WhatsApp Image 2026-09-24 at 22 25 52" src="https://github.com/user-attachments/assets/67091cfa-fb0b-437f-bc8a-d6e74ca5c729" />
 
 Here are the sketchs that I did for the first implementation. 
+
+
+# **Software and sensors**
+
+I used TIAKONGRC motors with 20 kg of torque, but my main problem is the speed of actuation. I do not know if the platform will react fast enough (I did not do enough previsions, so I am going to test and see if its enough). Here is the reference of the motors: https://bayhobbies.co.nz/tiankongac-20kg-digital-servo-high-torque-full-metal-gear-waterproof-servo-270-degree-with-25t-servo-horn/?srsltid=AU7gw4U7lks168itvwmimeYvdkK77_uPc8vz9mkhQFHDOvutGmBhPWa1
+
+The way I am going to test it, is by manually control the motors to balance the ball instead of using a controller. To do so, I will link the system to an accelerometer. 
+The accelerometer will provide data for roll and pitch. The esp32 will receive it, and compute the inverse kinematics so that the platform matches the inclination of the sensor. I decided to use my smartphone to generate the IMU values. 
+
+
