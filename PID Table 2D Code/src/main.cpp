@@ -1,18 +1,47 @@
 #include <Arduino.h>
 
-// put function declarations here:
-int myFunction(int, int);
+#include "servo_control.h"
+#include "wifi_interface.h"
 
-void setup() {
-  // put your setup code here, to run once:
-  int result = myFunction(2, 3);
+void setup()
+{
+  Serial.begin(115200);
+
+  delay(1000);
+
+  Serial.println();
+  Serial.println("==============================");
+  Serial.println("PID 2D Table");
+  Serial.println("==============================");
+
+  ServoControl::begin();
+  WifiInterface::begin();
 }
 
-void loop() {
-  // put your main code here, to run repeatedly:
-}
+void loop()
+{
+  WifiInterface::handleClient();
 
-// put function definitions here:
-int myFunction(int x, int y) {
-  return x + y;
+  int connectedClients = WifiInterface::connectedClients();
+
+  if (connectedClients == 0)
+  {
+    if (!ServoControl::isDemoRunning())
+    {
+      ServoControl::startDemo();
+    }
+
+    ServoControl::updateDemo();
+  }
+  else
+  {
+    if (ServoControl::isDemoRunning())
+    {
+      ServoControl::stopDemo();
+
+      Serial.println();
+      Serial.println("Client connecte");
+      Serial.println("Mode manuel");
+    }
+  }
 }
