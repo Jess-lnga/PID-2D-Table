@@ -5,7 +5,6 @@ namespace WifiInterface
 {
 void begin();
 void handleClient();
-int connectedClients();
 } // namespace WifiInterface
 
 #endif

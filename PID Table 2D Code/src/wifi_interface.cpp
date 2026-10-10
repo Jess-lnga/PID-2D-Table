@@ -3,7 +3,6 @@
 #include <Arduino.h>
 #include <WebServer.h>
 #include <WiFi.h>
-#include <WiFiUdp.h>
 
 #include "imu_data.h"
 #include "servo_control.h"
@@ -20,11 +19,6 @@ IPAddress gateway(192, 168, 1, 4);
 IPAddress subnet(255, 255, 255, 0);
 
 WebServer server(80);
-WiFiUDP imuUdp;
-
-constexpr uint16_t IMU_UDP_PORT = 4210;
-constexpr size_t IMU_UDP_BUFFER_SIZE = 128;
-
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -72,34 +66,6 @@ h1
     rgba(0,0,0,0.1);
 }
 
-input[type=range]
-{
-  width: 90%;
-  margin: 20px 0;
-}
-
-input[type=number]
-{
-  width: 110px;
-  font-size: 20px;
-  text-align: center;
-  padding: 8px;
-}
-
-button
-{
-  font-size: 17px;
-  padding: 10px 15px;
-  margin: 5px;
-  cursor: pointer;
-}
-
-.value
-{
-  font-size: 22px;
-  font-weight: bold;
-}
-
 .imu-grid
 {
   display: grid;
@@ -137,76 +103,21 @@ button
   margin-top: 10px;
 }
 
-.imu-button-active
-{
-  background: #1f7a4d;
-  color: white;
-}
-
-.viewer
-{
-  width: 260px;
-  height: 180px;
-  margin: 24px auto 10px;
-  perspective: 650px;
-}
-
-.platform
-{
-  width: 220px;
-  height: 140px;
-  margin: 0 auto;
-  transform-style: preserve-3d;
-  transition: transform 80ms linear;
-}
-
-.platform-top
-{
-  position: absolute;
-  width: 220px;
-  height: 140px;
-  border-radius: 8px;
-  background:
-    linear-gradient(135deg, #e8eef6, #9cb3c9);
-  border: 2px solid #43566b;
-  box-shadow:
-    0 18px 28px
-    rgba(0,0,0,0.22);
-  transform: rotateX(68deg);
-}
-
-.platform-axis
-{
-  position: absolute;
-  font-size: 13px;
-  font-weight: bold;
-  color: #253140;
-}
-
-.manual-imu
-{
-  margin-top: 22px;
-}
-
-.manual-imu label
-{
-  display: block;
-  margin-top: 14px;
-  color: #333;
-}
-
-.platform-axis-x
-{
-  right: 12px;
-  top: 58px;
-}
-
-.platform-axis-y
-{
-  left: 96px;
-  top: 10px;
-}
-
+.viewer { height: 250px; display: grid; place-items: center; perspective: 700px; }
+.cube-view { transform: rotateX(-20deg) rotateY(-25deg); transform-style: preserve-3d; }
+/* Sensor +Z is CSS -Y: positive 90 degrees about Z uses rotateY(-90deg). */
+.cube-heading { transform: rotateY(90deg); transform-style: preserve-3d; }
+button { padding: 10px 20px; margin: 12px; font-size: 16px; cursor: pointer; }
+button:disabled { cursor: default; opacity: .5; }
+.cube { width: 120px; height: 120px; position: relative; transform-style: preserve-3d; }
+.face { position: absolute; width: 120px; height: 120px; box-sizing: border-box; border: 2px solid #253140; display: grid; place-items: center; font-weight: bold; opacity: .9; backface-visibility: hidden; }
+.front { background: #91c9ed; transform: translateZ(60px); }
+.back { background: #91c9ed; transform: rotateY(180deg) translateZ(60px); }
+.right { background: #f4aa78; transform: rotateY(90deg) translateZ(60px); }
+.left { background: #f4aa78; transform: rotateY(-90deg) translateZ(60px); }
+.top { background: #88d4ab; transform: rotateX(90deg) translateZ(60px); }
+.bottom { background: #88d4ab; transform: rotateX(-90deg) translateZ(60px); }
+.viewer.inactive { opacity: .3; }
 @media (max-width: 520px)
 {
   .imu-grid
@@ -229,581 +140,147 @@ ESP32 Servo Controller
 
 <div class="servo-box">
 
-<h2>IMU Smartphone</h2>
-
-<button id="imuButton" onclick="toggleImuTransmission()">
-Activer transmission IMU
-</button>
-
-<div class="imu-status" id="imuStatus">
-Transmission inactive
-</div>
-
-<div class="imu-note" id="imuNote">
-UDP IMU: envoyer pitch=12.3,roll=-4.5 vers 192.168.1.4:4210.
-</div>
-
+<h2>Orientation MPU</h2>
+<div class="imu-status" id="imuStatus">Connexion...</div>
+<div class="imu-note" id="imuNote">Interrupteur OFF : automatique. ON : affichage IMU.</div>
 <div class="imu-grid">
-
-<div class="imu-reading">
-Pitch
-<span id="pitchDisplay">0.0 deg</span>
+<div class="imu-reading">Pitch<span id="pitchDisplay">—</span></div>
+<div class="imu-reading">Roll<span id="rollDisplay">—</span></div>
 </div>
-
-<div class="imu-reading">
-Roll
-<span id="rollDisplay">0.0 deg</span>
+<button id="calibrateButton" onclick="calibrateImu()" disabled>Calibrate</button>
+<div class="imu-note" id="calibrateFeedback" role="status"></div>
+<progress id="calibrationProgress" max="200" value="0" style="width:100%"></progress>
+<div class="imu-note" id="calibrationDetail">Calibration en attente</div>
+<details open><summary>Diagnostics MPU</summary>
+<pre id="imuDiagnostics" style="text-align:left;white-space:pre-wrap;overflow-wrap:anywhere">En attente...</pre>
+</details>
+<div class="viewer inactive" id="viewer">
+<div class="cube-view"><div class="cube-heading"><div class="cube" id="cube">
+<div class="face front">Avant</div><div class="face back">Arrière</div>
+<div class="face right">X</div><div class="face left">−X</div>
+<div class="face top">Z ↑</div><div class="face bottom">−Z</div>
+</div></div></div></div>
+<div class="imu-note">Roll : rotation autour de X. Pitch : rotation autour de Y.
+Le cap (yaw) n'est pas représenté. Les servos gardent leur dernière position en mode IMU.</div>
 </div>
-
-</div>
-
-<div class="manual-imu">
-
-<label for="manualPitch">
-Pitch test
-</label>
-
-<input
-type="range"
-id="manualPitch"
-min="-45"
-max="45"
-value="0"
-step="0.5"
-oninput="manualImuChanged()"
->
-
-<label for="manualRoll">
-Roll test
-</label>
-
-<input
-type="range"
-id="manualRoll"
-min="-45"
-max="45"
-value="0"
-step="0.5"
-oninput="manualImuChanged()"
->
-
-</div>
-
-<div class="viewer">
-<div class="platform" id="platform3d">
-<div class="platform-top">
-<div class="platform-axis platform-axis-x">Roll</div>
-<div class="platform-axis platform-axis-y">Pitch</div>
-</div>
-</div>
-</div>
-
-</div>
-
-<!-- SERVO 1 -->
 
 <div class="servo-box">
-
-<h2>Servo 1 - GPIO 25</h2>
-
-<div class="value">
-<span id="display1">1300</span> us
-</div>
-
-<input
-type="range"
-id="slider1"
-min="1090"
-max="1510"
-value="1300"
-step="1"
-oninput="sliderChanged(1)"
->
-
-<br>
-
-<button onclick="incrementServo(1,-10)">
--10 us
-</button>
-
-<input
-type="number"
-id="number1"
-min="1090"
-max="1510"
-value="1300"
-step="1"
-onchange="numberChanged(1)"
->
-
-<button onclick="incrementServo(1,10)">
-+10 us
-</button>
-
-</div>
-
-<!-- SERVO 2 -->
-
-<div class="servo-box">
-
-<h2>Servo 2 - GPIO 26</h2>
-
-<div class="value">
-<span id="display2">1215</span> us
-</div>
-
-<input
-type="range"
-id="slider2"
-min="965"
-max="1465"
-value="1215"
-step="1"
-oninput="sliderChanged(2)"
->
-
-<br>
-
-<button onclick="incrementServo(2,-10)">
--10 us
-</button>
-
-<input
-type="number"
-id="number2"
-min="965"
-max="1465"
-value="1215"
-step="1"
-onchange="numberChanged(2)"
->
-
-<button onclick="incrementServo(2,10)">
-+10 us
-</button>
-
-</div>
-
-<!-- SERVO 3 -->
-
-<div class="servo-box">
-
-<h2>Servo 3 - GPIO 27</h2>
-
-<div class="value">
-<span id="display3">1340</span> us
-</div>
-
-<input
-type="range"
-id="slider3"
-min="1130"
-max="1550"
-value="1340"
-step="1"
-oninput="sliderChanged(3)"
->
-
-<br>
-
-<button onclick="incrementServo(3,-10)">
--10 us
-</button>
-
-<input
-type="number"
-id="number3"
-min="1130"
-max="1550"
-value="1340"
-step="1"
-onchange="numberChanged(3)"
->
-
-<button onclick="incrementServo(3,10)">
-+10 us
-</button>
-
+<h2>Positions des servos</h2>
+<p>Affichage uniquement : le mode est choisi par l'interrupteur physique.</p>
+<p>Servo 1 · GPIO 25 : <strong id="display1">—</strong> µs</p>
+<p>Servo 2 · GPIO 26 : <strong id="display2">—</strong> µs</p>
+<p>Servo 3 · GPIO 27 : <strong id="display3">—</strong> µs</p>
 </div>
 
 <script>
 
-let imuTransmissionEnabled = false;
-let imuSendTimer = null;
-let latestPitch = 0.0;
-let latestRoll = 0.0;
-let lastImuSendMs = 0;
-let imuSensorAvailable =
-  typeof DeviceOrientationEvent !== "undefined";
+let calibrationRequestPending = false;
+let latestImuState = null;
 
-function clamp(value, minValue, maxValue)
+function updateCalibrateButton()
 {
-  return Math.min(
-    Math.max(value, minValue),
-    maxValue
-  );
+  document.getElementById("calibrateButton").disabled = calibrationRequestPending ||
+    !latestImuState || !latestImuState.imuEnabled || !latestImuState.imuConnected;
 }
 
-function setImuUI(enabled)
+async function calibrateImu()
 {
-  imuTransmissionEnabled = enabled;
-
-  let button =
-    document.getElementById("imuButton");
-
-  button.innerHTML =
-    enabled ?
-    "Arreter transmission IMU" :
-    "Activer transmission IMU";
-
-  button.classList.toggle(
-    "imu-button-active",
-    enabled
-  );
-
-  document.getElementById("imuStatus").innerHTML =
-    enabled ?
-    "Transmission active" :
-    "Transmission inactive";
-}
-
-function setImuNote(message)
-{
-  document.getElementById("imuNote").innerHTML =
-    message;
-}
-
-function updateImuDisplay(pitch, roll)
-{
-  latestPitch = pitch;
-  latestRoll = roll;
-
-  document.getElementById("pitchDisplay").innerHTML =
-    pitch.toFixed(1) + " deg";
-
-  document.getElementById("rollDisplay").innerHTML =
-    roll.toFixed(1) + " deg";
-
-  let visualPitch =
-    clamp(pitch, -45, 45);
-
-  let visualRoll =
-    clamp(roll, -45, 45);
-
-  document.getElementById("platform3d").style.transform =
-    "rotateX(" +
-    (-visualPitch).toFixed(1) +
-    "deg) rotateY(" +
-    visualRoll.toFixed(1) +
-    "deg)";
-}
-
-function sendImuSample()
-{
-  if (!imuTransmissionEnabled)
+  if (calibrationRequestPending || !latestImuState || !latestImuState.imuEnabled || !latestImuState.imuConnected) return;
+  calibrationRequestPending = true;
+  updateCalibrateButton();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
+  const feedback = document.getElementById("calibrateFeedback");
+  try
   {
-    return;
+    const response = await fetch("/imu/calibrate", {method: "POST", signal: controller.signal});
+    if (!response.ok) throw new Error(await response.text());
+    feedback.textContent = "Calibration relancee : garder le MPU immobile environ 2 secondes.";
   }
-
-  fetch(
-    "/imu?pitch=" +
-    latestPitch.toFixed(3) +
-    "&roll=" +
-    latestRoll.toFixed(3)
-  );
-}
-
-function manualImuChanged()
-{
-  let pitch =
-    parseFloat(
-      document.getElementById("manualPitch").value
-    );
-
-  let roll =
-    parseFloat(
-      document.getElementById("manualRoll").value
-    );
-
-  updateImuDisplay(
-    pitch,
-    roll
-  );
-
-  if (!imuTransmissionEnabled)
+  catch (error)
   {
-    fetch("/imu/mode?enabled=1")
-    .then(() =>
-    {
-      setImuUI(true);
-      setImuNote(
-        "Mode test manuel actif. Ces valeurs passent par la meme route /imu que les donnees smartphone."
-      );
-      sendImuSample();
-    });
-
-    return;
+    feedback.textContent = "Calibration non confirmee : " + error.message;
   }
-
-  sendImuSample();
-}
-
-function onDeviceOrientation(event)
-{
-  if (!imuTransmissionEnabled)
+  finally
   {
-    return;
-  }
-
-  let pitch =
-    event.beta || 0.0;
-
-  let roll =
-    event.gamma || 0.0;
-
-  updateImuDisplay(
-    pitch,
-    roll
-  );
-
-  let now =
-    Date.now();
-
-  if (now - lastImuSendMs >= 50)
-  {
-    lastImuSendMs = now;
-    sendImuSample();
+    clearTimeout(timeout);
+    calibrationRequestPending = false;
+    updateCalibrateButton();
   }
 }
 
-function startImuTransmission()
+function updateImuDisplay(data)
 {
-  fetch("/imu/mode?enabled=1")
-  .then(() =>
+  latestImuState = data;
+  updateCalibrateButton();
+  const valid = data.imuEnabled && data.imuConnected && data.imuHasData && data.imuAgeMs < 250;
+  document.getElementById("imuStatus").textContent = !data.imuEnabled ? "Mode automatique — interrupteur OFF" :
+    !data.imuConnected ? "Mode IMU — " + data.imuDiagnostic :
+    !data.imuCalibrated ? "Calibration — " + data.imuDiagnostic :
+    !valid ? "Mode IMU — en attente de mesures" : "Mode IMU — mesures actives";
+  document.getElementById("imuNote").textContent = data.imuConnected ?
+    "MPU : adresse 0x" + data.imuAddress.toString(16) + ", identification 0x" + data.imuDeviceId.toString(16) :
+    "SDA : GPIO 21 · SCL : GPIO 22 · interrupteur : GPIO 32";
+  document.getElementById("calibrationProgress").value = data.imuCalibrationSamples;
+  document.getElementById("calibrationProgress").hidden = !data.imuEnabled || data.imuCalibrated;
+  document.getElementById("calibrationDetail").textContent = !data.imuEnabled ? "Acquisition arretee" :
+    data.imuCalibrated ? "Calibration terminee — angles relatifs au zero choisi" :
+    data.imuCalibrationSamples + "/200 mesures stables — " + data.imuCalibrationRestarts + " redemarrages. Angles provisoires issus de l'accelerometre.";
+  const vector = (values, unit) => values.map(value => value.toFixed(3)).join(", ") + " " + unit;
+  document.getElementById("imuDiagnostics").textContent =
+    "Mesures recues : " + data.imuSamples + " | age : " + (data.imuSamples ? data.imuAgeMs + " ms" : "aucune") +
+    "\nAccel XYZ : " + vector(data.accelG, "g") + " | norme : " + data.gravityG.toFixed(3) + " g" +
+    "\nGyro XYZ : " + vector(data.gyroDps, "deg/s") +
+    "\nBiais gyro : " + vector(data.gyroBiasDps, "deg/s") +
+    "\nZero manipulation : roll " + data.rollZeroDeg.toFixed(2) + " deg, pitch " + data.pitchZeroDeg.toFixed(2) + " deg" +
+    "\nINT_STATUS : 0x" + data.imuInterruptStatus.toString(16) +
+    " | erreurs I2C : " + data.imuI2cErrors +
+    " | dernier registre : 0x" + data.imuLastRegister.toString(16) +
+    " | code : " + data.imuLastI2cError + " (255 = lecture incomplete)" +
+    "\n" + data.imuDiagnostic;
+  document.getElementById("viewer").classList.toggle("inactive", !valid);
+  document.getElementById("pitchDisplay").textContent = valid ? data.pitch.toFixed(1) + " °" : "—";
+  document.getElementById("rollDisplay").textContent = valid ? data.roll.toFixed(1) + " °" : "—";
+  if (valid)
   {
-    setImuUI(true);
-    setImuNote(
-      "Capteur navigateur actif. Les donnees pitch/roll sont envoyees vers l'ESP32."
-    );
-
-    window.addEventListener(
-      "deviceorientation",
-      onDeviceOrientation
-    );
-
-    if (imuSendTimer === null)
-    {
-      imuSendTimer =
-        setInterval(
-          sendImuSample,
-          200
-        );
-    }
-  });
-}
-
-function stopImuTransmission()
-{
-  fetch("/imu/mode?enabled=0")
-  .then(() =>
-  {
-    setImuUI(false);
-    setImuNote(
-      "Transmission arretee. Les sliders restent disponibles pour tester la pipeline."
-    );
-
-    window.removeEventListener(
-      "deviceorientation",
-      onDeviceOrientation
-    );
-
-    if (imuSendTimer !== null)
-    {
-      clearInterval(imuSendTimer);
-      imuSendTimer = null;
-    }
-  });
-}
-
-function toggleImuTransmission()
-{
-  if (imuTransmissionEnabled)
-  {
-    stopImuTransmission();
-    return;
+    // Sensor X -> screen right, Y -> screen depth, Z -> screen up.
+    // Matrix is R_y(pitch)*R_x(roll), expressed in CSS coordinates.
+    const r = data.roll * Math.PI / 180, p = -data.pitch * Math.PI / 180;
+    const cr = Math.cos(r), sr = Math.sin(r), cp = Math.cos(p), sp = Math.sin(p);
+    const matrix = [cp, -sp, 0, 0, sp*cr, cp*cr, -sr, 0, sp*sr, cp*sr, cr, 0, 0, 0, 0, 1];
+    document.getElementById("cube").style.transform = "matrix3d(" + matrix.join(",") + ")";
   }
-
-  if (
-    imuSensorAvailable &&
-    typeof DeviceOrientationEvent.requestPermission === "function"
-  )
-  {
-    DeviceOrientationEvent.requestPermission()
-    .then(permissionState =>
-    {
-      if (permissionState === "granted")
-      {
-        startImuTransmission();
-      }
-      else
-      {
-        document.getElementById("imuStatus").innerHTML =
-          "Permission IMU refusee";
-        setImuNote(
-          "Le navigateur voit l'API IMU, mais l'autorisation capteur a ete refusee."
-        );
-      }
-    })
-    .catch(() =>
-    {
-      document.getElementById("imuStatus").innerHTML =
-        "Permission IMU indisponible";
-      setImuNote(
-        "Le navigateur ne permet pas d'obtenir la permission capteur sur cette page."
-      );
-    });
-
-    return;
-  }
-
-  if (!imuSensorAvailable)
-  {
-    document.getElementById("imuStatus").innerHTML =
-      "IMU non disponible dans ce navigateur";
-    setImuNote(
-      "Essaie depuis un smartphone avec Chrome/Firefox Android. Sur iPhone ou certains navigateurs, les capteurs sont bloques sur les pages HTTP comme celle de l'ESP32."
-    );
-    return;
-  }
-
-  startImuTransmission();
 }
 
 function setUI(servo, value)
 {
-  document.getElementById(
-    "slider" + servo
-  ).value = value;
-
-  document.getElementById(
-    "number" + servo
-  ).value = value;
-
-  document.getElementById(
-    "display" + servo
-  ).innerHTML = value;
+  document.getElementById("display" + servo).textContent = value;
 }
 
-function sendServo(servo, value)
+async function updateState()
 {
-  value = parseInt(value);
-
-  setUI(
-    servo,
-    value
-  );
-
-  fetch(
-    "/set?servo=" +
-    servo +
-    "&us=" +
-    value
-  );
-}
-
-function sliderChanged(servo)
-{
-  let slider =
-    document.getElementById(
-      "slider" + servo
-    );
-
-  sendServo(
-    servo,
-    slider.value
-  );
-}
-
-function numberChanged(servo)
-{
-  let number =
-    document.getElementById(
-      "number" + servo
-    );
-
-  sendServo(
-    servo,
-    number.value
-  );
-}
-
-function incrementServo(
-  servo,
-  increment
-)
-{
-  let number =
-    document.getElementById(
-      "number" + servo
-    );
-
-  let value =
-    parseInt(number.value);
-
-  value += increment;
-
-  sendServo(
-    servo,
-    value
-  );
-}
-
-function updateState()
-{
-  fetch("/state")
-
-  .then(response =>
-    response.json()
-  )
-
-  .then(data =>
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
+  try
   {
-    setUI(
-      1,
-      data.servo1
-    );
-
-    setUI(
-      2,
-      data.servo2
-    );
-
-    setUI(
-      3,
-      data.servo3
-    );
-
-    setImuUI(
-      data.imuTransmissionEnabled
-    );
-
-    if (data.imuHasData)
-    {
-      updateImuDisplay(
-        data.pitch,
-        data.roll
-      );
-    }
-  });
+    const response = await fetch("/state", {cache: "no-store", signal: controller.signal});
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const data = await response.json();
+    setUI(1, data.servo1); setUI(2, data.servo2); setUI(3, data.servo3);
+    updateImuDisplay(data);
+  }
+  catch (error)
+  {
+    latestImuState = null;
+    updateCalibrateButton();
+    document.getElementById("imuStatus").textContent = "Connexion ESP32 interrompue";
+    document.getElementById("viewer").classList.add("inactive");
+    document.getElementById("pitchDisplay").textContent = "—";
+    document.getElementById("rollDisplay").textContent = "—";
+  }
+  finally { clearTimeout(timeout); setTimeout(updateState, 100); }
 }
-
-window.onload =
-  updateState;
-
-setInterval(
-  updateState,
-  200
-);
+window.onload = updateState;
 
 </script>
 
@@ -814,7 +291,8 @@ setInterval(
 
 void handleRoot()
 {
-  server.send(200, "text/html", index_html);
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "text/html; charset=utf-8", index_html);
 }
 
 void handleState()
@@ -838,9 +316,19 @@ void handleState()
 
   json += ",";
 
-  json += "\"imuTransmissionEnabled\":";
-  json += imuState.transmissionEnabled ? "true" : "false";
+  json += "\"imuEnabled\":";
+  json += imuState.enabled ? "true" : "false";
 
+  json += ",";
+
+  json += "\"imuConnected\":";
+  json += imuState.connected ? "true" : "false";
+  json += ",\"imuCalibrated\":";
+  json += imuState.calibrated ? "true" : "false";
+  json += ",\"imuAddress\":";
+  json += String(imuState.address);
+  json += ",\"imuDeviceId\":";
+  json += String(imuState.deviceId);
   json += ",";
 
   json += "\"imuHasData\":";
@@ -859,161 +347,49 @@ void handleState()
   json += ",";
 
   json += "\"imuAgeMs\":";
-  json += imuState.hasData ? String(millis() - imuState.lastUpdateMs) : "0";
+  json += imuState.samples ? String(millis() - imuState.lastUpdateMs) : "0";
 
+  json += ",\"imuDiagnostic\":\"";
+  json += imuState.diagnostic; // Fixed internal messages, no user input.
+  json += "\",\"imuSamples\":" + String(imuState.samples);
+  json += ",\"imuCalibrationSamples\":" + String(imuState.calibrationSamples);
+  json += ",\"imuCalibrationRestarts\":" + String(imuState.calibrationRestarts);
+  json += ",\"imuI2cErrors\":" + String(imuState.i2cErrors);
+  json += ",\"imuInterruptStatus\":" + String(imuState.interruptStatus);
+  json += ",\"imuLastRegister\":" + String(imuState.lastRegister);
+  json += ",\"imuLastI2cError\":" + String(imuState.lastI2cError);
+  json += ",\"rollZeroDeg\":" + String(imuState.rollZeroDeg, 4);
+  json += ",\"pitchZeroDeg\":" + String(imuState.pitchZeroDeg, 4);
+  json += ",\"gravityG\":" + String(imuState.gravityG, 4);
+  const float* vectors[] = {imuState.accelG, imuState.gyroDps, imuState.gyroBiasDps};
+  const char* names[] = {"accelG", "gyroDps", "gyroBiasDps"};
+  for (unsigned v = 0; v < 3; ++v)
+  {
+    json += ",\""; json += names[v]; json += "\":[";
+    for (unsigned axis = 0; axis < 3; ++axis)
+    {
+      if (axis) json += ",";
+      json += String(vectors[v][axis], 4);
+    }
+    json += "]";
+  }
   json += "}";
 
+  server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", json);
 }
 
-void handleImuMode()
+void handleCalibrate()
 {
-  if (!server.hasArg("enabled"))
+  server.sendHeader("Cache-Control", "no-store");
+  if (!ImuData::calibrate())
   {
-    server.send(400, "text/plain", "Parametre manquant");
+    server.send(409, "text/plain", "Activer le mode IMU et verifier la connexion du MPU.");
     return;
   }
-
-  bool enabled = server.arg("enabled").toInt() != 0;
-
-  ImuData::setTransmissionEnabled(enabled);
-
-  Serial.println();
-  Serial.println(
-    enabled ?
-    "Transmission IMU activee" :
-    "Transmission IMU arretee");
-
-  server.send(200, "text/plain", "OK");
+  server.send(200, "text/plain", "Calibration relancee");
 }
 
-void handleImuData()
-{
-  if (!server.hasArg("pitch") || !server.hasArg("roll"))
-  {
-    server.send(400, "text/plain", "Parametres manquants");
-    return;
-  }
-
-  float pitch = server.arg("pitch").toFloat();
-  float roll = server.arg("roll").toFloat();
-
-  ImuData::update(pitch, roll);
-
-  server.send(200, "text/plain", "OK");
-}
-
-void handleSetServo()
-{
-  if (!server.hasArg("servo") || !server.hasArg("us"))
-  {
-    server.send(400, "text/plain", "Parametres manquants");
-    return;
-  }
-
-  int servoNumber = server.arg("servo").toInt();
-  int pulseWidth = server.arg("us").toInt();
-
-  if (!ServoControl::setServoMicroseconds(servoNumber, pulseWidth))
-  {
-    server.send(400, "text/plain", "Servo invalide");
-    return;
-  }
-
-  server.send(200, "text/plain", "OK");
-}
-
-bool parseFloatAfterKey(const char* message, const char* key, float& value)
-{
-  const char* keyPosition = strstr(message, key);
-
-  if (keyPosition == nullptr)
-  {
-    return false;
-  }
-
-  const char* valueStart = strchr(keyPosition, ':');
-
-  if (valueStart == nullptr)
-  {
-    valueStart = strchr(keyPosition, '=');
-  }
-
-  if (valueStart == nullptr)
-  {
-    return false;
-  }
-
-  value = atof(valueStart + 1);
-  return true;
-}
-
-bool parseImuMessage(const char* message, float& pitch, float& roll)
-{
-  bool hasPitch = parseFloatAfterKey(message, "pitch", pitch);
-  bool hasRoll = parseFloatAfterKey(message, "roll", roll);
-
-  if (hasPitch && hasRoll)
-  {
-    return true;
-  }
-
-  char* endPointer = nullptr;
-  pitch = strtof(message, &endPointer);
-
-  if (endPointer == message)
-  {
-    return false;
-  }
-
-  while (*endPointer == ' ' || *endPointer == ',' || *endPointer == ';')
-  {
-    endPointer++;
-  }
-
-  char* rollStart = endPointer;
-  roll = strtof(rollStart, &endPointer);
-
-  return endPointer != rollStart;
-}
-
-void handleImuUdp()
-{
-  int packetSize = imuUdp.parsePacket();
-
-  if (packetSize <= 0)
-  {
-    return;
-  }
-
-  char buffer[IMU_UDP_BUFFER_SIZE];
-  int bytesRead = imuUdp.read(buffer, IMU_UDP_BUFFER_SIZE - 1);
-
-  if (bytesRead <= 0)
-  {
-    return;
-  }
-
-  buffer[bytesRead] = '\0';
-
-  float pitch = 0.0f;
-  float roll = 0.0f;
-
-  if (!parseImuMessage(buffer, pitch, roll))
-  {
-    Serial.print("Message UDP IMU invalide : ");
-    Serial.println(buffer);
-    return;
-  }
-
-  if (!ImuData::isTransmissionEnabled())
-  {
-    ImuData::setTransmissionEnabled(true);
-    Serial.println("Transmission IMU activee par UDP");
-  }
-
-  ImuData::update(pitch, roll);
-}
 } // namespace
 
 void begin()
@@ -1032,29 +408,19 @@ void begin()
   Serial.println(WiFi.softAPIP());
 
   server.on("/", handleRoot);
-  server.on("/set", handleSetServo);
   server.on("/state", handleState);
-  server.on("/imu/mode", handleImuMode);
-  server.on("/imu", handleImuData);
+  server.on("/imu/calibrate", HTTP_POST, handleCalibrate);
 
   server.begin();
 
   Serial.println("Serveur web demarre");
 
-  imuUdp.begin(IMU_UDP_PORT);
 
-  Serial.print("UDP IMU : port ");
-  Serial.println(IMU_UDP_PORT);
 }
 
 void handleClient()
 {
   server.handleClient();
-  handleImuUdp();
 }
 
-int connectedClients()
-{
-  return WiFi.softAPgetStationNum();
-}
 } // namespace WifiInterface
