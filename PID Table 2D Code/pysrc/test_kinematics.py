@@ -81,6 +81,43 @@ class KinematicsTests(unittest.TestCase):
         self.assertIn('q1', viewer.info.get_text())
         viewer.reload_parameters(None)
         viewer.fig.canvas.draw()
+        # Pose updates must not accumulate artists or alter the camera.
+        objects = tuple(viewer.ax.get_children())
+        viewer.ax.view_init(elev=17, azim=33)
+        viewer.fig.canvas.draw()
+        for i in range(10):
+            viewer.sliders[1].set_val(i-5)
+        self.assertEqual(tuple(viewer.ax.get_children()), objects)
+        self.assertEqual((viewer.ax.elev, viewer.ax.azim), (17, 33))
+        viewer.sliders[1].set_val(7)
+        from types import SimpleNamespace
+        viewer._flush_update(SimpleNamespace(name='button_release_event'))
+        self.assertIn('7.000', viewer.info.get_text())
+        # Multiple cursor events are coalesced into one update of the latest pose.
+        viewer._interactive = True
+        viewer.sliders[1].set_val(2)
+        viewer.sliders[1].set_val(4)
+        self.assertTrue(viewer._dirty)
+        viewer._flush_update(SimpleNamespace(name='button_release_event'))
+        self.assertFalse(viewer._dirty)
+        self.assertIn('4.000', viewer.info.get_text())
+        viewer._interactive = False
+        viewer.fig.set_size_inches(12, 8)
+        viewer.fig.canvas.draw()
+        viewer.update(force_info=True)
+        plt.close(viewer.fig)
+
+    def test_viewer_fallback(self):
+        import matplotlib
+        matplotlib.use('Agg')
+        from kinematics_viewer import Viewer
+        from kinematics_model import DEFAULT_HEADER
+        import matplotlib.pyplot as plt
+        viewer = Viewer(DEFAULT_HEADER, use_blit=False)
+        viewer.sliders[1].set_val(5)
+        viewer.update(force_info=True)
+        self.assertIn('5.000', viewer.info.get_text())
+        self.assertFalse(any(a.get_animated() for a in viewer._dynamic_artists))
         plt.close(viewer.fig)
 
 

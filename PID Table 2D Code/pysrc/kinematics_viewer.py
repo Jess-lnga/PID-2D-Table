@@ -1,5 +1,6 @@
 """Run: python pysrc/kinematics_viewer.py (Python 3.10+)."""
 import argparse
+import time
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
@@ -14,11 +15,17 @@ ERRORS = {'InvalidParameters': 'Paramètres invalides', 'InvalidInput': 'Consign
 
 
 class Viewer:
-    def __init__(self, header, z_max=None, tilt_max=40):
+    def __init__(self, header, z_max=None, tilt_max=40, fps=30, use_blit=True):
         self.header = Path(header)
         self.parameters = load_parameters(self.header)
         self.last_valid = None
         self.show_planes = False
+        self._background = None
+        self._dirty = False
+        self._saving = False
+        self._text_cache = {}
+        self._info_last = 0.0
+        self._info_kind = None
         self.fig = plt.figure(figsize=(13, 9))
         self.fig.canvas.manager.set_window_title('PID Table — debug cinématique inverse')
         self.ax = self.fig.add_axes([.03, .28, .68, .66], projection='3d')
@@ -38,13 +45,101 @@ class Viewer:
         self.reset.on_clicked(self.reset_pose)
         self.reload.on_clicked(self.reload_parameters)
         self.check.on_clicked(self.toggle_planes)
+        self._use_blit = use_blit and self.fig.canvas.supports_blit
+        self._interactive = self.fig.canvas.required_interactive_framework is not None
+        self._frame_interval_ms = max(1, round(1000/fps))
+        self._frame_started = 0.0
+        self._timer = self.fig.canvas.new_timer(interval=self._frame_interval_ms)
+        self._timer.single_shot = True
+        self._timer.add_callback(self._flush_update)
+        self._create_artists()
+        self._configure_scene()
         for slider in self.sliders:
-            slider.on_changed(self.update)
+            # Slider redraws would otherwise trigger a second full figure render.
+            slider.drawon = False
+            slider.on_changed(self.request_update)
+        self.fig.canvas.mpl_connect('draw_event', self._on_draw)
+        self.fig.canvas.mpl_connect('resize_event', self._invalidate_background)
+        self.fig.canvas.mpl_connect('button_release_event', self._flush_update)
+        self.fig.canvas.mpl_connect('close_event', lambda event: self._timer.stop())
         self.update()
+
+    def request_update(self, _=None):
+        if not self._interactive:
+            self.update()
+            return
+        was_dirty = self._dirty
+        self._dirty = True
+        if not was_dirty:
+            elapsed_ms = (time.perf_counter()-self._frame_started)*1000
+            self._timer.interval = max(1, round(self._frame_interval_ms-elapsed_ms))
+            self._timer.start()
+
+    def _flush_update(self, _=None):
+        if self._dirty:
+            self._timer.stop()
+            self._dirty = False
+            self.update(force_info=getattr(_, "name", None) == "button_release_event")
+        elif getattr(_, 'name', None) == 'button_release_event':
+            self.update(force_info=True)
+
+    def _invalidate_background(self, _=None):
+        self._background = None
+
+    def _on_draw(self, event):
+        if not self._use_blit or self._saving:
+            return
+        self._text_cache.clear()
+        self._background = self.fig.canvas.copy_from_bbox(self.fig.bbox)
+        self._draw_dynamic()
+
+    def _draw_dynamic(self):
+        for artist in self._dynamic_artists:
+            if artist.get_visible():
+                if isinstance(artist, Poly3DCollection):
+                    artist.do_3d_projection()
+                if artist in (self.info, self.status, self.feedback):
+                    # Reuse rasterized diagnostics/status when their content is unchanged.
+                    key = (artist.get_text(), str(artist.get_color()))
+                    cached = self._text_cache.get(artist)
+                    if cached is not None and cached[0] == key:
+                        self.fig.canvas.restore_region(cached[1])
+                        continue
+                    self.fig.draw_artist(artist)
+                    if artist.get_text():
+                        bbox = artist.get_window_extent(self.fig.canvas.get_renderer()).expanded(1.02, 1.05)
+                        self._text_cache[artist] = (key, self.fig.canvas.copy_from_bbox(bbox))
+                else:
+                    self.fig.draw_artist(artist)
+
+    def _render(self):
+        if self._use_blit and self._background is not None:
+            self.fig.canvas.restore_region(self._background)
+            self._draw_dynamic()
+            self.fig.canvas.blit(self.fig.bbox)
+        else:
+            self.fig.canvas.draw_idle()
+
+    def save_snapshot(self, path):
+        self.update(force_info=True)
+        # Animated artists are excluded by savefig unless explicitly restored.
+        self._saving = True
+        try:
+            for artist in self._dynamic_artists:
+                artist.set_animated(False)
+            self.fig.savefig(path, dpi=140)
+        finally:
+            for artist in self._dynamic_artists:
+                artist.set_animated(self._use_blit)
+            self._saving = False
+            self._background = None
 
     def reset_pose(self, _):
         for slider in self.sliders:
             slider.reset()
+        self._timer.stop()
+        self._dirty = False
+        self.update(force_info=True)
 
     def reload_parameters(self, _):
         try:
@@ -56,53 +151,111 @@ class Viewer:
             self.feedback.set_text('Paramètres relus depuis kinematics.h')
         except (OSError, ValueError) as exc:
             self.feedback.set_text(f'Lecture impossible : {exc}')
+        self._configure_scene()
         self.update()
 
     def toggle_planes(self, _):
         self.show_planes = not self.show_planes
+        for plane in self.planes:
+            plane.set_visible(self.show_planes)
+        self._background = None
         self.update()
 
-    def plot_line(self, points, **kwargs):
-        self.ax.plot(*np.asarray(points).T, **kwargs)
-
-    def draw_structure(self, result, ghost=False):
-        alpha = .3 if ghost else 1
+    def _create_artists(self):
+        # All objects persist across poses. No ax.clear(), new labels or collections.
+        self.platform = Poly3DCollection([np.zeros((3, 3))], facecolors='#66aadd', edgecolors='#335577', alpha=.22)
+        self.ax.add_collection3d(self.platform)
+        self.structure_artists = [self.platform]
+        self.legs = []
         for i, color in enumerate(COLORS):
-            base, elbow, joint = result.bases[i], result.elbows[i], result.joints[i]
-            self.plot_line([base, elbow], color=color, linewidth=5, alpha=alpha)
-            self.plot_line([elbow, joint], color=color, linewidth=2.5, alpha=alpha)
-            self.ax.scatter(*np.array([base, elbow, joint]).T, color=color, s=35, alpha=alpha)
-            for name, point in zip((f'S{i+1}', f'E{i+1}', 'ABC'[i]), (base, elbow, joint)):
-                self.ax.text(*point, ' '+name, color=color, alpha=alpha)
-        self.ax.add_collection3d(Poly3DCollection([result.joints], facecolors='#66aadd',
-                                                  edgecolors='#335577', alpha=.08 if ghost else .22))
-        self.ax.scatter(*result.center, color='#222222', s=35, alpha=alpha)
-        self.ax.text(*result.center, ' P', alpha=alpha)
+            upper, = self.ax.plot([], [], [], color=color, linewidth=5)
+            lower, = self.ax.plot([], [], [], color=color, linewidth=2.5)
+            points, = self.ax.plot([], [], [], linestyle='', marker='o', color=color, markersize=6)
+            labels = [self.ax.text(0, 0, 0, ' '+name, color=color)
+                      for name in (f'S{i+1}', f'E{i+1}', 'ABC'[i])]
+            self.legs.append((upper, lower, points, labels))
+            self.structure_artists.extend([upper, lower, points, *labels])
+        self.center_marker, = self.ax.plot([], [], [], linestyle='', marker='o', color='#222222')
+        self.center_label = self.ax.text(0, 0, 0, ' P')
+        self.structure_artists.extend([self.center_marker, self.center_label])
+        self.axes_lines = []
         for i, color in enumerate(('red', 'green', 'blue')):
-            end = result.center+result.rotation[:, i]*30
-            self.plot_line([result.center, end], color=color, alpha=alpha)
-            self.ax.text(*end, 'xyz'[i], color=color, alpha=alpha)
+            line, = self.ax.plot([], [], [], color=color)
+            label = self.ax.text(0, 0, 0, 'xyz'[i], color=color)
+            self.axes_lines.append((line, label))
+            self.structure_artists.extend([line, label])
+        self.target_line, = self.ax.plot([], [], [], color='crimson', linestyle='--', linewidth=2)
+        self.target_points, = self.ax.plot([], [], [], color='crimson', linestyle='', marker='x', markersize=8)
+        self.base_circle, = self.ax.plot([], [], [], color='gray', linestyle='--', linewidth=1)
+        self.planes = []
+        for color in COLORS:
+            plane = Poly3DCollection([np.zeros((4, 3))], facecolors=color, alpha=.06, visible=False)
+            self.ax.add_collection3d(plane)
+            self.planes.append(plane)
+        # Draw 2D slider axes as a unit, avoiding private Slider handle attributes.
+        self._dynamic_artists = [*self.structure_artists, self.target_line, self.target_points,
+                                 self.info, self.status, self.feedback, *(slider.ax for slider in self.sliders)]
+        for artist in self._dynamic_artists:
+            artist.set_animated(self._use_blit)
+        for artist in self.structure_artists:
+            artist.set_visible(False)
+        self.target_line.set_visible(False)
+        self.target_points.set_visible(False)
 
-    def update(self, _=None):
-        z, roll, pitch = (slider.val for slider in self.sliders)
+    @staticmethod
+    def _set_line(artist, points):
+        artist.set_data_3d(*np.asarray(points).T)
+
+    @staticmethod
+    def _set_label(artist, point):
+        artist.set_position_3d(tuple(point))
+
+    def _configure_scene(self):
+        # Limits and background only change when dimensions are reloaded.
         p = self.parameters
-        result = compute_kinematics(p, z, roll, pitch)
-        elev, azim = self.ax.elev, self.ax.azim
-        self.ax.clear()
-        self.ax.view_init(elev=elev, azim=azim)
         radius = max(p.Rb+p.L1, 1.6*p.Rp, 50)
         top = max(p.L1+p.L2, p.h0+self.sliders[0].valmax+p.Rp, 100)
         self.ax.set(xlim=(-radius, radius), ylim=(-radius, radius), zlim=(-p.L1, top),
                     xlabel='X (mm)', ylabel='Y (mm)', zlabel='Z (mm)')
         self.ax.set_box_aspect((2*radius, 2*radius, top+p.L1))
-        theta = np.linspace(0, 2*np.pi, 100)
-        self.plot_line(np.column_stack((p.Rb*np.cos(theta), p.Rb*np.sin(theta), np.zeros_like(theta))),
-                       color='gray', linestyle='--', linewidth=1)
-        if self.show_planes:
-            for i, color in enumerate(COLORS):
-                e = np.array([np.cos(i*2*np.pi/3), np.sin(i*2*np.pi/3), 0])
-                corners = [-radius*e, radius*e, radius*e+[0, 0, top], -radius*e+[0, 0, top]]
-                self.ax.add_collection3d(Poly3DCollection([corners], facecolors=color, alpha=.06))
+        self.ax.set_autoscale_on(False)
+        theta = np.linspace(0, 2*np.pi, 80)
+        self._set_line(self.base_circle, np.column_stack((p.Rb*np.cos(theta), p.Rb*np.sin(theta), np.zeros_like(theta))))
+        for i, plane in enumerate(self.planes):
+            e = np.array([np.cos(i*2*np.pi/3), np.sin(i*2*np.pi/3), 0])
+            plane.set_verts([[-radius*e, radius*e, radius*e+[0, 0, top], -radius*e+[0, 0, top]]])
+            plane.set_visible(self.show_planes)
+        self._background = None
+        self._info_kind = None
+
+    def draw_structure(self, result, ghost=False):
+        alpha = .3 if ghost else 1
+        for artist in self.structure_artists:
+            artist.set_visible(True)
+            artist.set_alpha(alpha)
+        self.platform.set_alpha(.08 if ghost else .22)
+        self.platform.set_verts([result.joints])
+        for i, (upper, lower, points, labels) in enumerate(self.legs):
+            base, elbow, joint = result.bases[i], result.elbows[i], result.joints[i]
+            self._set_line(upper, [base, elbow])
+            self._set_line(lower, [elbow, joint])
+            self._set_line(points, [base, elbow, joint])
+            for label, point in zip(labels, (base, elbow, joint)):
+                self._set_label(label, point)
+        self._set_line(self.center_marker, [result.center])
+        self._set_label(self.center_label, result.center)
+        for i, (line, label) in enumerate(self.axes_lines):
+            end = result.center+result.rotation[:, i]*30
+            self._set_line(line, [result.center, end])
+            self._set_label(label, end)
+
+    def update(self, _=None, force_info=False):
+        self._frame_started = time.perf_counter()
+        z, roll, pitch = (slider.val for slider in self.sliders)
+        p = self.parameters
+        result = compute_kinematics(p, z, roll, pitch)
+        self.target_line.set_visible(False)
+        self.target_points.set_visible(False)
         if result.valid:
             self.last_valid = result
             self.draw_structure(result)
@@ -111,10 +264,15 @@ class Viewer:
         else:
             if self.last_valid is not None:
                 self.draw_structure(self.last_valid, ghost=True)
+            else:
+                for artist in self.structure_artists:
+                    artist.set_visible(False)
             if result.joints is not None:
                 target = np.vstack((result.joints, result.joints[0]))
-                self.plot_line(target, color='crimson', linestyle='--', linewidth=2)
-                self.ax.scatter(*result.joints.T, color='crimson', marker='x', s=65)
+                self._set_line(self.target_line, target)
+                self._set_line(self.target_points, result.joints)
+                self.target_line.set_visible(True)
+                self.target_points.set_visible(True)
             leg = '' if result.failed_leg < 0 else f' — bras {"ABC"[result.failed_leg]}'
             self.status.set_text(ERRORS[result.error]+leg+' | cible rouge ; dernière pose valide en transparence')
             self.status.set_color('crimson')
@@ -134,8 +292,12 @@ class Viewer:
         else:
             text += f'\nPAS DE SOLUTION\n{result.error}\nAngles non appliqués\n'
         text += '\nLimites q (°) :\n'+ '\n'.join(f'{i+1}: [{p.q_min[i]:g}, {p.q_max[i]:g}]  branche {p.elbow_sign[i]:g}' for i in range(3))
-        self.info.set_text(text)
-        self.fig.canvas.draw_idle()
+        now = time.perf_counter()
+        if force_info or result.error != self._info_kind or now-self._info_last >= .12:
+            self.info.set_text(text)
+            self._info_last = now
+            self._info_kind = result.error
+        self._render()
 
 
 def main():
@@ -143,16 +305,18 @@ def main():
     parser.add_argument('--header', type=Path, default=DEFAULT_HEADER)
     parser.add_argument('--z-max', type=float)
     parser.add_argument('--tilt-max', type=float, default=40)
+    parser.add_argument('--fps', type=int, default=30, help='Fréquence maximale des mises à jour (défaut : 30)')
+    parser.add_argument('--no-blit', action='store_true', help='Désactive le rendu accéléré pour compatibilité')
     parser.add_argument('--snapshot', type=Path, help='Enregistre une image sans ouvrir de fenêtre')
     args = parser.parse_args()
-    if (args.z_max is not None and args.z_max <= 0) or args.tilt_max <= 0:
+    if (args.z_max is not None and args.z_max <= 0) or args.tilt_max <= 0 or args.fps <= 0:
         parser.error('Les amplitudes des curseurs doivent être positives')
     try:
-        viewer = Viewer(args.header, args.z_max, args.tilt_max)
+        viewer = Viewer(args.header, args.z_max, args.tilt_max, args.fps, not args.no_blit)
     except (OSError, ValueError) as exc:
         parser.exit(1, f'Erreur de paramètres : {exc}\n')
     if args.snapshot:
-        viewer.fig.savefig(args.snapshot, dpi=140)
+        viewer.save_snapshot(args.snapshot)
         plt.close(viewer.fig)
     else:
         plt.show()

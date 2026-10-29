@@ -2,29 +2,29 @@
 #include "servo_control.h"
 #include "wifi_interface.h"
 #include "imu_data.h"
+#include "servo_calibration.h"
+#include "platform_control.h"
+#include "runtime_lock.h"
 
 void setup()
 {
+  RuntimeLock::begin();
   Serial.begin(115200);
   delay(1000);
   Serial.println("PID 2D Table - MPU I2C");
   ServoControl::begin();
+  ServoCalibration::begin();
   ImuData::begin();
   WifiInterface::begin();
 }
 
 void loop()
 {
-  ImuData::update();
-  if (ImuData::isEnabled())
   {
-    // Keep the last servo positions; orientation is displayed only.
-    if (ServoControl::isDemoRunning()) ServoControl::stopDemo();
+    RuntimeLock::Guard guard;
+    ImuData::update();
+    ServoCalibration::update();
+    PlatformControl::update(ImuData::getState());
   }
-  else
-  {
-    if (!ServoControl::isDemoRunning()) ServoControl::startDemo();
-    ServoControl::updateDemo();
-  }
-  WifiInterface::handleClient();
+  delay(1); // HTTP runs independently on core 0; sensor/control run on core 1.
 }

@@ -9,6 +9,8 @@ struct State
   bool enabled = false;
   bool connected = false;
   bool calibrated = false;
+  bool calibrationActive = false;
+  bool calibrationFailed = false;
   bool hasData = false;
   uint8_t address = 0;
   uint8_t deviceId = 0;
@@ -19,6 +21,9 @@ struct State
   unsigned long lastUpdateMs = 0;
   uint32_t samples = 0;
   uint32_t i2cErrors = 0;
+  uint32_t i2cRetries = 0;
+  uint32_t i2cRecoveries = 0;
+  unsigned i2cConsecutiveFailures = 0;
   uint32_t calibrationRestarts = 0;
   unsigned calibrationSamples = 0;
   uint8_t interruptStatus = 0;

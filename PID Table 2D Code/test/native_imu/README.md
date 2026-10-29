@@ -17,3 +17,5 @@ g++ -std=c++17 -Itest/native_imu test/native_imu/test_imu.cpp -o /tmp/pid-imu-te
 ```
 
 These are host tests only; real sensor timing, noise, power and wiring still require hardware validation.
+
+New regression cases cover modest stationary gyro noise, preserving 190 accepted samples through a single severe spike, rejecting sustained movement and excessive window variance, and detecting slowly changing gravity.

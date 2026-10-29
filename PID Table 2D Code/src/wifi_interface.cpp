@@ -6,6 +6,11 @@
 
 #include "imu_data.h"
 #include "servo_control.h"
+#include "servo_calibration.h"
+#include "servo_calibration_web.h"
+#include "platform_control.h"
+#include "runtime_lock.h"
+#include <errno.h>
 
 namespace WifiInterface
 {
@@ -133,6 +138,8 @@ button:disabled { cursor: default; opacity: .5; }
 <body>
 
 <h1>PID 2D Table</h1>
+<div id="mainMenu">
+<button id="openServoCal" onclick="openCalMenu()">Calibrate servo</button>
 
 <div class="subtitle">
 ESP32 Servo Controller
@@ -141,44 +148,43 @@ ESP32 Servo Controller
 <div class="servo-box">
 
 <h2>Orientation MPU</h2>
-<div class="imu-status" id="imuStatus">Connexion...</div>
-<div class="imu-note" id="imuNote">Interrupteur OFF : automatique. ON : affichage IMU.</div>
-<div class="imu-grid">
-<div class="imu-reading">Pitch<span id="pitchDisplay">—</span></div>
-<div class="imu-reading">Roll<span id="rollDisplay">—</span></div>
-</div>
 <button id="calibrateButton" onclick="calibrateImu()" disabled>Calibrate</button>
-<div class="imu-note" id="calibrateFeedback" role="status"></div>
-<progress id="calibrationProgress" max="200" value="0" style="width:100%"></progress>
-<div class="imu-note" id="calibrationDetail">Calibration en attente</div>
-<details open><summary>Diagnostics MPU</summary>
-<pre id="imuDiagnostics" style="text-align:left;white-space:pre-wrap;overflow-wrap:anywhere">En attente...</pre>
-</details>
+<div id="calibrateFeedback" role="status"></div>
+<p id="imuStatus" class="imu-status" role="status">Connexion à l’ESP32…</p>
+<div class="imu-grid">
+<div class="imu-reading">Roll<span id="imuRoll">—</span></div>
+<div class="imu-reading">Pitch<span id="imuPitch">—</span></div>
+</div>
+<div class="imu-note">Calibration uniquement sur demande : cliquer sur Calibrate et garder le MPU immobile.</div>
+<pre id="imuDiagnostics" style="text-align:left;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.6" aria-label="Diagnostics IMU"></pre>
 <div class="viewer inactive" id="viewer">
 <div class="cube-view"><div class="cube-heading"><div class="cube" id="cube">
 <div class="face front">Avant</div><div class="face back">Arrière</div>
 <div class="face right">X</div><div class="face left">−X</div>
 <div class="face top">Z ↑</div><div class="face bottom">−Z</div>
 </div></div></div></div>
-<div class="imu-note">Roll : rotation autour de X. Pitch : rotation autour de Y.
-Le cap (yaw) n'est pas représenté. Les servos gardent leur dernière position en mode IMU.</div>
+
 </div>
 
 <div class="servo-box">
-<h2>Positions des servos</h2>
-<p>Affichage uniquement : le mode est choisi par l'interrupteur physique.</p>
-<p>Servo 1 · GPIO 25 : <strong id="display1">—</strong> µs</p>
-<p>Servo 2 · GPIO 26 : <strong id="display2">—</strong> µs</p>
-<p>Servo 3 · GPIO 27 : <strong id="display3">—</strong> µs</p>
+<h2>Hauteur de la plateforme</h2>
+<label>z au-dessus de h0 (mm) : <input id="heightInput" type="number" min="0" step="1" value="0"></label>
+<button id="heightButton" onclick="setHeight()">Appliquer</button>
+<p id="heightFeedback" role="status"></p>
 </div>
 
+</div>
+<!--SERVO_CAL_MENU-->
 <script>
+/*SERVO_CAL_SCRIPT*/
 
 let calibrationRequestPending = false;
 let latestImuState = null;
 
 function updateCalibrateButton()
 {
+  document.getElementById("calibrateButton").textContent = latestImuState && latestImuState.imuEnabled && latestImuState.imuConnected && latestImuState.imuCalibrationActive ?
+    "Calibration " + Math.round((latestImuState.imuCalibrationSamples || 0)/2) + "%" : "Calibrate";
   document.getElementById("calibrateButton").disabled = calibrationRequestPending ||
     !latestImuState || !latestImuState.imuEnabled || !latestImuState.imuConnected;
 }
@@ -212,35 +218,32 @@ async function calibrateImu()
 function updateImuDisplay(data)
 {
   latestImuState = data;
+  const number = (value, digits=3) => Number.isFinite(value) ? value.toFixed(digits) : "—";
+  const hex = value => Number.isFinite(value) ? "0x" + value.toString(16).toUpperCase().padStart(2,"0") : "—";
+  const vector = values => Array.isArray(values) ? values.map(value => number(value)).join(" / ") : "—";
+  const calibration = data.imuCalibrationActive ? "EN COURS" : data.imuCalibrationFailed ? "INTERROMPUE" : "inactive";
+  document.getElementById("imuStatus").textContent = data.imuDiagnostic || "État indisponible";
+  document.getElementById("imuRoll").textContent = number(data.roll,2) + "°";
+  document.getElementById("imuPitch").textContent = number(data.pitch,2) + "°";
+  document.getElementById("imuDiagnostics").textContent = [
+    "Interrupteur GPIO 32 : " + (data.imuEnabled ? "ON" : "OFF"),
+    "MPU connecté : " + (data.imuConnected ? "oui" : "non") + " | Adresse : " + hex(data.imuAddress) + " | WHO_AM_I : " + hex(data.imuDeviceId),
+    "Calibration : " + calibration + " | Référence valide : " + (data.imuCalibrated ? "oui" : "non"),
+    "Progression : " + data.imuCalibrationSamples + "/200 échantillons | Échecs de cette tentative : " + data.imuCalibrationRestarts,
+    "Données valides : " + (data.imuHasData ? "oui" : "non") + " | Échantillons lus : " + data.imuSamples + " | Âge : " + (data.imuSamples ? data.imuAgeMs + " ms" : "aucune mesure"),
+    "Accélération X / Y / Z (g) : " + vector(data.imuAccelG),
+    "Norme accélération (g) : " + number(data.imuGravityG),
+    "Gyroscope X / Y / Z (°/s) : " + vector(data.imuGyroDps),
+    "Biais gyro X / Y / Z (°/s) : " + vector(data.imuGyroBiasDps),
+    "Zéro roll / pitch (°) : " + number(data.imuRollZeroDeg) + " / " + number(data.imuPitchZeroDeg),
+    "Erreurs I²C : " + data.imuI2cErrors + " | Dernier registre : " + hex(data.imuLastRegister) + " | Code : " + data.imuLastI2cError,
+    "Tentatives I²C supplémentaires : " + data.imuI2cRetries + " | Récupérations bus : " + data.imuI2cRecoveries + " | Trames perdues consécutives : " + data.imuI2cConsecutiveFailures,
+    "INT_STATUS : " + hex(data.imuInterruptStatus)
+  ].join("\n");
+  if (data.imuCalibrationFailed) document.getElementById("calibrateFeedback").textContent = "Calibration interrompue. Immobiliser le MPU puis cliquer sur Calibrate pour réessayer.";
   updateCalibrateButton();
   const valid = data.imuEnabled && data.imuConnected && data.imuHasData && data.imuAgeMs < 250;
-  document.getElementById("imuStatus").textContent = !data.imuEnabled ? "Mode automatique — interrupteur OFF" :
-    !data.imuConnected ? "Mode IMU — " + data.imuDiagnostic :
-    !data.imuCalibrated ? "Calibration — " + data.imuDiagnostic :
-    !valid ? "Mode IMU — en attente de mesures" : "Mode IMU — mesures actives";
-  document.getElementById("imuNote").textContent = data.imuConnected ?
-    "MPU : adresse 0x" + data.imuAddress.toString(16) + ", identification 0x" + data.imuDeviceId.toString(16) :
-    "SDA : GPIO 21 · SCL : GPIO 22 · interrupteur : GPIO 32";
-  document.getElementById("calibrationProgress").value = data.imuCalibrationSamples;
-  document.getElementById("calibrationProgress").hidden = !data.imuEnabled || data.imuCalibrated;
-  document.getElementById("calibrationDetail").textContent = !data.imuEnabled ? "Acquisition arretee" :
-    data.imuCalibrated ? "Calibration terminee — angles relatifs au zero choisi" :
-    data.imuCalibrationSamples + "/200 mesures stables — " + data.imuCalibrationRestarts + " redemarrages. Angles provisoires issus de l'accelerometre.";
-  const vector = (values, unit) => values.map(value => value.toFixed(3)).join(", ") + " " + unit;
-  document.getElementById("imuDiagnostics").textContent =
-    "Mesures recues : " + data.imuSamples + " | age : " + (data.imuSamples ? data.imuAgeMs + " ms" : "aucune") +
-    "\nAccel XYZ : " + vector(data.accelG, "g") + " | norme : " + data.gravityG.toFixed(3) + " g" +
-    "\nGyro XYZ : " + vector(data.gyroDps, "deg/s") +
-    "\nBiais gyro : " + vector(data.gyroBiasDps, "deg/s") +
-    "\nZero manipulation : roll " + data.rollZeroDeg.toFixed(2) + " deg, pitch " + data.pitchZeroDeg.toFixed(2) + " deg" +
-    "\nINT_STATUS : 0x" + data.imuInterruptStatus.toString(16) +
-    " | erreurs I2C : " + data.imuI2cErrors +
-    " | dernier registre : 0x" + data.imuLastRegister.toString(16) +
-    " | code : " + data.imuLastI2cError + " (255 = lecture incomplete)" +
-    "\n" + data.imuDiagnostic;
   document.getElementById("viewer").classList.toggle("inactive", !valid);
-  document.getElementById("pitchDisplay").textContent = valid ? data.pitch.toFixed(1) + " °" : "—";
-  document.getElementById("rollDisplay").textContent = valid ? data.roll.toFixed(1) + " °" : "—";
   if (valid)
   {
     // Sensor X -> screen right, Y -> screen depth, Z -> screen up.
@@ -252,9 +255,16 @@ function updateImuDisplay(data)
   }
 }
 
-function setUI(servo, value)
+async function setHeight()
 {
-  document.getElementById("display" + servo).textContent = value;
+  const button=document.getElementById('heightButton'); button.disabled=true;
+  const controller=new AbortController(), timeout=setTimeout(()=>controller.abort(),3000);
+  try {
+    const response=await fetch('/platform/height',{method:'POST',body:new URLSearchParams({z:document.getElementById('heightInput').value}),signal:controller.signal});
+    const message=await response.text();
+    document.getElementById('heightFeedback').textContent=message;
+  } catch(error) { document.getElementById('heightFeedback').textContent='Commande non confirmée : connexion interrompue.'; }
+  finally {clearTimeout(timeout);button.disabled=false;}
 }
 
 async function updateState()
@@ -263,22 +273,22 @@ async function updateState()
   const timeout = setTimeout(() => controller.abort(), 3000);
   try
   {
-    const response = await fetch("/state", {cache: "no-store", signal: controller.signal});
+    const response = await fetch("/state?calSession=" + calToken, {cache: "no-store", signal: controller.signal});
     if (!response.ok) throw new Error("HTTP " + response.status);
     const data = await response.json();
-    setUI(1, data.servo1); setUI(2, data.servo2); setUI(3, data.servo3);
+    if (document.activeElement!==document.getElementById('heightInput')) document.getElementById('heightInput').value=data.heightMm;
     updateImuDisplay(data);
+    renderServoCalibration(data.servoCalibration);
   }
   catch (error)
   {
+    calDisableCommands(true);
     latestImuState = null;
     updateCalibrateButton();
-    document.getElementById("imuStatus").textContent = "Connexion ESP32 interrompue";
     document.getElementById("viewer").classList.add("inactive");
-    document.getElementById("pitchDisplay").textContent = "—";
-    document.getElementById("rollDisplay").textContent = "—";
+    document.getElementById("imuStatus").textContent = "Connexion web interrompue : " + error.message + " (dernières mesures conservées à l’écran)";
   }
-  finally { clearTimeout(timeout); setTimeout(updateState, 100); }
+  finally { clearTimeout(timeout); setTimeout(updateState, calState && calState.menuActive ? 200 : 250); }
 }
 window.onload = updateState;
 
@@ -292,30 +302,26 @@ window.onload = updateState;
 void handleRoot()
 {
   server.sendHeader("Cache-Control", "no-store");
-  server.send(200, "text/html; charset=utf-8", index_html);
+  String page = FPSTR(index_html);
+  page.replace("<!--SERVO_CAL_MENU-->", ServoCalibrationWeb::html());
+  page.replace("/*SERVO_CAL_SCRIPT*/", ServoCalibrationWeb::script());
+  server.send(200, "text/html; charset=utf-8", page);
 }
 
 void handleState()
 {
+  RuntimeLock::Guard guard;
+  // A valid session heartbeat prevents calibration motion from surviving a lost UI.
+  if (server.hasArg("calSession"))
+  {
+    const String token = server.arg("calSession");
+    char* end = nullptr;
+    const unsigned long value = strtoul(token.c_str(), &end, 10);
+    if (end != token.c_str() && *end == 0) ServoCalibration::heartbeat(value);
+  }
   ImuData::State imuState = ImuData::getState();
 
   String json = "{";
-
-  json += "\"servo1\":";
-  json += ServoControl::getServoMicroseconds(1);
-
-  json += ",";
-
-  json += "\"servo2\":";
-  json += ServoControl::getServoMicroseconds(2);
-
-  json += ",";
-
-  json += "\"servo3\":";
-  json += ServoControl::getServoMicroseconds(3);
-
-  json += ",";
-
   json += "\"imuEnabled\":";
   json += imuState.enabled ? "true" : "false";
 
@@ -349,40 +355,46 @@ void handleState()
   json += "\"imuAgeMs\":";
   json += imuState.samples ? String(millis() - imuState.lastUpdateMs) : "0";
 
-  json += ",\"imuDiagnostic\":\"";
-  json += imuState.diagnostic; // Fixed internal messages, no user input.
-  json += "\",\"imuSamples\":" + String(imuState.samples);
+  json += ",\"imuCalibrationActive\":"; json += imuState.calibrationActive ? "true" : "false";
+  json += ",\"imuCalibrationFailed\":"; json += imuState.calibrationFailed ? "true" : "false";
   json += ",\"imuCalibrationSamples\":" + String(imuState.calibrationSamples);
+  json += ",\"imuDiagnostic\":\"" + String(imuState.diagnostic) + "\"";
+  json += ",\"imuSamples\":" + String(imuState.samples);
   json += ",\"imuCalibrationRestarts\":" + String(imuState.calibrationRestarts);
   json += ",\"imuI2cErrors\":" + String(imuState.i2cErrors);
-  json += ",\"imuInterruptStatus\":" + String(imuState.interruptStatus);
+  json += ",\"imuI2cRetries\":" + String(imuState.i2cRetries);
+  json += ",\"imuI2cRecoveries\":" + String(imuState.i2cRecoveries);
+  json += ",\"imuI2cConsecutiveFailures\":" + String(imuState.i2cConsecutiveFailures);
   json += ",\"imuLastRegister\":" + String(imuState.lastRegister);
   json += ",\"imuLastI2cError\":" + String(imuState.lastI2cError);
-  json += ",\"rollZeroDeg\":" + String(imuState.rollZeroDeg, 4);
-  json += ",\"pitchZeroDeg\":" + String(imuState.pitchZeroDeg, 4);
-  json += ",\"gravityG\":" + String(imuState.gravityG, 4);
+  json += ",\"imuInterruptStatus\":" + String(imuState.interruptStatus);
+  json += ",\"imuGravityG\":" + String(imuState.gravityG, 4);
+  json += ",\"imuRollZeroDeg\":" + String(imuState.rollZeroDeg, 3);
+  json += ",\"imuPitchZeroDeg\":" + String(imuState.pitchZeroDeg, 3);
   const float* vectors[] = {imuState.accelG, imuState.gyroDps, imuState.gyroBiasDps};
-  const char* names[] = {"accelG", "gyroDps", "gyroBiasDps"};
-  for (unsigned v = 0; v < 3; ++v)
-  {
-    json += ",\""; json += names[v]; json += "\":[";
-    for (unsigned axis = 0; axis < 3; ++axis)
-    {
+  const char* keys[] = {"imuAccelG", "imuGyroDps", "imuGyroBiasDps"};
+  for (unsigned i = 0; i < 3; ++i) {
+    json += ",\""; json += keys[i]; json += "\":[";
+    for (unsigned axis = 0; axis < 3; ++axis) {
       if (axis) json += ",";
-      json += String(vectors[v][axis], 4);
+      json += String(vectors[i][axis], 4);
     }
     json += "]";
   }
+  json += ",\"heightMm\":" + String(PlatformControl::heightMm(), 3);
+  json += ",\"servoCalibration\":" + ServoCalibrationWeb::stateJson();
   json += "}";
 
   server.sendHeader("Cache-Control", "no-store");
+  guard.release();
   server.send(200, "application/json", json);
 }
 
 void handleCalibrate()
 {
   server.sendHeader("Cache-Control", "no-store");
-  if (!ImuData::calibrate())
+  bool ok; { RuntimeLock::Guard guard; ok = ImuData::calibrate(); }
+  if (!ok)
   {
     server.send(409, "text/plain", "Activer le mode IMU et verifier la connexion du MPU.");
     return;
@@ -390,6 +402,18 @@ void handleCalibrate()
   server.send(200, "text/plain", "Calibration relancee");
 }
 
+void handleHeight()
+{
+  const String text=server.arg("z"); char* end=nullptr; errno=0;
+  float z=strtof(text.c_str(), &end);
+  bool ok=false;
+  if (!errno && end!=text.c_str() && *end==0) { RuntimeLock::Guard guard; ok=PlatformControl::setHeightMm(z); }
+  server.send(ok?200:409,"text/plain; charset=utf-8",ok?"Hauteur mise à jour.":"Hauteur refusée : pose impossible, calibration indisponible ou menu servo actif.");
+}
+void webTask(void*)
+{
+  for (;;) { server.handleClient(); vTaskDelay(1); }
+}
 } // namespace
 
 void begin()
@@ -409,9 +433,12 @@ void begin()
 
   server.on("/", handleRoot);
   server.on("/state", handleState);
+  server.on("/platform/height", HTTP_POST, handleHeight);
+  ServoCalibrationWeb::registerRoutes(server);
   server.on("/imu/calibrate", HTTP_POST, handleCalibrate);
 
   server.begin();
+  if (xTaskCreatePinnedToCore(webTask,"http",8192,nullptr,1,nullptr,0)!=pdPASS) Serial.println("ERREUR creation tache HTTP");
 
   Serial.println("Serveur web demarre");
 

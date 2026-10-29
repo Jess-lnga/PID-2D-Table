@@ -5,6 +5,8 @@ struct WireStub {
   uint8_t regs[256] = {}, buffer[14] = {}, reg=0;
   bool first=true, ready=true, shortRead=false, fail=false, ignoreConfig=false;
   unsigned index=0, availableBytes=0;
+  unsigned recoveries=0, transientFailures=0;
+  void end() {++recoveries;}
   void begin(int,int) {}
   void setClock(int) {}
   void setTimeOut(int) {}
@@ -13,7 +15,7 @@ struct WireStub {
     if(first) {reg=value;first=false;}
     else if(!ignoreConfig) {regs[reg]=value;}
   }
-  uint8_t endTransmission(bool=true) { return fail ? 2 : 0; }
+  uint8_t endTransmission(bool=true) { if (transientFailures) {--transientFailures;return 2;} return fail ? 2 : 0; }
   size_t requestFrom(uint8_t,uint8_t count) {
     index=0;availableBytes=shortRead ? count-1 : count;
     if(reg==0x3B) std::memcpy(buffer,regs+0x3B,14);

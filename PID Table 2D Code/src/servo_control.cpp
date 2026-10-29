@@ -1,4 +1,7 @@
 #include "servo_control.h"
+#include "servo_calibration.h"
+#include "kinematics.h"
+#include "platform_control.h"
 
 #include <math.h>
 
@@ -6,52 +9,18 @@ namespace ServoControl
 {
 namespace
 {
-constexpr int MAIN_STEPS = 60;
-constexpr unsigned long MAIN_STEP_DELAY_MS = 50;
-constexpr int MAIN_CYCLES = 3;
-
-constexpr int WAVE_AMPLITUDE_US = 90;
-constexpr int WAVE_STEPS_PER_CYCLE = 90;
-constexpr int WAVE_CYCLES = 3;
-constexpr unsigned long WAVE_STEP_DELAY_MS = 50;
-
-constexpr int TRANSITION_STEPS = 40;
-constexpr unsigned long TRANSITION_DELAY_MS = 50;
-
-enum DemoState
-{
-  DEMO_MOVE_TO_MAX,
-  DEMO_MAIN_SWEEP,
-  DEMO_MOVE_TO_WAVE_CENTER,
-  DEMO_WAVE,
-  DEMO_RETURN_TO_WAVE_CENTER
-};
-
-DemoState demoState = DEMO_MOVE_TO_MAX;
 bool demoRunning = false;
-
+bool waveReady = false;
+bool waitingCalibration = false;
+const char* waveStatus = "Vague suspendue";
+DemoPose wavePose = {PlatformControl::heightMm(), 0, 0, false};
+unsigned long lastWaveUpdate = 0, waveStart = 0;
+uint32_t wavePhaseMs = 0;
+int waveStartTicks[3] = {};
 int servo1_us = SERVO1_MID_US;
 int servo2_us = SERVO2_MID_US;
 int servo3_us = SERVO3_MID_US;
-
-int mainIndex = 0;
-int mainDirection = 1;
-int mainCycleCount = 0;
-unsigned long lastMainUpdate = 0;
-
-int waveStep = 0;
-unsigned long lastWaveUpdate = 0;
-
-int transitionStart1 = 0;
-int transitionStart2 = 0;
-int transitionStart3 = 0;
-
-int transitionTarget1 = 0;
-int transitionTarget2 = 0;
-int transitionTarget3 = 0;
-
-int transitionIndex = 0;
-unsigned long lastTransitionUpdate = 0;
+int rawTicks[3] = {};
 
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
 constexpr bool USE_LEDC_PIN_API = true;
@@ -109,198 +78,10 @@ int servoChannel(int servoNumber)
 void setServoPulseByNumber(int servoNumber, int pulse_us)
 {
   uint32_t duty = microsecondsToDuty(pulse_us);
+  rawTicks[servoNumber-1] = duty;
   ledcWrite(servoChannel(servoNumber), duty);
 }
 
-int interpolateValue(int startValue, int endValue, int index, int totalSteps)
-{
-  float ratio = (float)index / (float)(totalSteps - 1);
-  return startValue + (int)((endValue - startValue) * ratio);
-}
-
-void startTransition(int target1, int target2, int target3)
-{
-  transitionStart1 = servo1_us;
-  transitionStart2 = servo2_us;
-  transitionStart3 = servo3_us;
-
-  transitionTarget1 = target1;
-  transitionTarget2 = target2;
-  transitionTarget3 = target3;
-
-  transitionIndex = 0;
-  lastTransitionUpdate = 0;
-}
-
-bool updateTransition()
-{
-  unsigned long now = millis();
-
-  if (now - lastTransitionUpdate < TRANSITION_DELAY_MS)
-  {
-    return false;
-  }
-
-  lastTransitionUpdate = now;
-
-  servo1_us = interpolateValue(
-    transitionStart1,
-    transitionTarget1,
-    transitionIndex,
-    TRANSITION_STEPS);
-
-  servo2_us = interpolateValue(
-    transitionStart2,
-    transitionTarget2,
-    transitionIndex,
-    TRANSITION_STEPS);
-
-  servo3_us = interpolateValue(
-    transitionStart3,
-    transitionTarget3,
-    transitionIndex,
-    TRANSITION_STEPS);
-
-  writeAllServos();
-
-  transitionIndex++;
-
-  if (transitionIndex >= TRANSITION_STEPS)
-  {
-    servo1_us = transitionTarget1;
-    servo2_us = transitionTarget2;
-    servo3_us = transitionTarget3;
-
-    writeAllServos();
-
-    return true;
-  }
-
-  return false;
-}
-
-void initialiseMainSweep()
-{
-  mainIndex = 0;
-  mainDirection = 1;
-  mainCycleCount = 0;
-  lastMainUpdate = 0;
-
-  Serial.println();
-  Serial.println("Debut mouvement haut/bas");
-}
-
-void updateMainSweep()
-{
-  unsigned long now = millis();
-
-  if (now - lastMainUpdate < MAIN_STEP_DELAY_MS)
-  {
-    return;
-  }
-
-  lastMainUpdate = now;
-
-  servo1_us = interpolateValue(SERVO1_MAX_US, SERVO1_MIN_US, mainIndex, MAIN_STEPS);
-  servo2_us = interpolateValue(SERVO2_MAX_US, SERVO2_MIN_US, mainIndex, MAIN_STEPS);
-  servo3_us = interpolateValue(SERVO3_MAX_US, SERVO3_MIN_US, mainIndex, MAIN_STEPS);
-
-  writeAllServos();
-
-  if (mainDirection > 0)
-  {
-    if (mainIndex >= MAIN_STEPS - 1)
-    {
-      mainDirection = -1;
-    }
-    else
-    {
-      mainIndex++;
-    }
-  }
-  else
-  {
-    if (mainIndex <= 0)
-    {
-      mainCycleCount++;
-
-      Serial.print("Cycle haut/bas : ");
-      Serial.println(mainCycleCount);
-
-      if (mainCycleCount >= MAIN_CYCLES)
-      {
-        Serial.println("Passage vers centre de vague");
-
-        demoState = DEMO_MOVE_TO_WAVE_CENTER;
-
-        startTransition(
-          SERVO1_WAVE_CENTER_US,
-          SERVO2_WAVE_CENTER_US,
-          SERVO3_WAVE_CENTER_US);
-
-        return;
-      }
-
-      mainDirection = 1;
-    }
-    else
-    {
-      mainIndex--;
-    }
-  }
-}
-
-void initialiseWave()
-{
-  waveStep = 0;
-  lastWaveUpdate = 0;
-
-  Serial.println();
-  Serial.println("Debut mouvement de vague");
-}
-
-void updateWave()
-{
-  unsigned long now = millis();
-
-  if (now - lastWaveUpdate < WAVE_STEP_DELAY_MS)
-  {
-    return;
-  }
-
-  lastWaveUpdate = now;
-
-  const int totalWaveSteps = WAVE_STEPS_PER_CYCLE * WAVE_CYCLES;
-
-  float phase = 2.0f * PI * ((float)waveStep / (float)WAVE_STEPS_PER_CYCLE);
-  float phase1 = phase;
-  float phase2 = phase - (2.0f * PI / 3.0f);
-  float phase3 = phase - (4.0f * PI / 3.0f);
-
-  servo1_us = SERVO1_WAVE_CENTER_US + (int)(WAVE_AMPLITUDE_US * sinf(phase1));
-  servo2_us = SERVO2_WAVE_CENTER_US + (int)(WAVE_AMPLITUDE_US * sinf(phase2));
-  servo3_us = SERVO3_WAVE_CENTER_US + (int)(WAVE_AMPLITUDE_US * sinf(phase3));
-
-  servo1_us = constrain(servo1_us, SERVO1_MIN_US, SERVO1_MAX_US);
-  servo2_us = constrain(servo2_us, SERVO2_MIN_US, SERVO2_MAX_US);
-  servo3_us = constrain(servo3_us, SERVO3_MIN_US, SERVO3_MAX_US);
-
-  writeAllServos();
-
-  waveStep++;
-
-  if (waveStep >= totalWaveSteps)
-  {
-    Serial.println("3 cycles de vague termines");
-
-    demoState = DEMO_RETURN_TO_WAVE_CENTER;
-
-    startTransition(
-      SERVO1_WAVE_CENTER_US,
-      SERVO2_WAVE_CENTER_US,
-      SERVO3_WAVE_CENTER_US);
-  }
-}
 } // namespace
 
 void begin()
@@ -389,6 +170,24 @@ bool setServoMicroseconds(int servoNumber, int pulseWidth)
   }
 }
 
+int getServoTicks(int servoNumber)
+{
+  return servoNumber >= 1 && servoNumber <= 3 ? rawTicks[servoNumber-1] : 0;
+}
+bool setServoTicks(int servoNumber, int ticks)
+{
+  if (servoNumber < 1 || servoNumber > 3 || ticks < ServoCalibration::MIN_TICKS || ticks > ServoCalibration::MAX_TICKS) return false;
+  rawTicks[servoNumber-1] = ticks;
+  int pulse = (int)((uint64_t(ticks)*20000 + 32767)/65535);
+  if (servoNumber == 1) servo1_us = pulse;
+  if (servoNumber == 2) servo2_us = pulse;
+  if (servoNumber == 3) servo3_us = pulse;
+  ledcWrite(servoChannel(servoNumber), ticks);
+  return true;
+}
+bool setServoAngle(int servo, float angle) { return ServoCalibration::setServoAngle(servo, angle); }
+bool setKinematicAngles(float q1, float q2, float q3) { return ServoCalibration::setJointAngles(q1, q2, q3); }
+
 void writeAllServos()
 {
   setServoPulseByNumber(1, servo1_us);
@@ -403,56 +202,81 @@ bool isDemoRunning()
 
 void startDemo()
 {
+  if (ServoCalibration::isActive()) return;
   demoRunning = true;
-
-  Serial.println();
-  Serial.println("=== MODE DEMONSTRATION ===");
-
-  demoState = DEMO_MOVE_TO_MAX;
-
-  startTransition(SERVO1_MAX_US, SERVO2_MAX_US, SERVO3_MAX_US);
+  waveReady = false;
+  wavePhaseMs = 0;
+  lastWaveUpdate = millis();
+  waitingCalibration = false;
+  waveStatus = "Vague roll/pitch: initialisation";
+  wavePose = {PlatformControl::heightMm(), 0, 0, false};
+  Serial.println("Vague roll/pitch via cinematique inverse et calibrations.");
 }
 
 void stopDemo()
 {
   demoRunning = false;
+  waveReady = false;
+  waitingCalibration = false;
+  wavePose.valid = false;
+  waveStatus = "Vague suspendue (IMU ou calibration)";
 }
+
+const char* demoStatus() { return waveStatus; }
+DemoPose getDemoPose() { return wavePose; }
+bool isDemoWaitingForCalibration() { return demoRunning && waitingCalibration; }
 
 void updateDemo()
 {
-  switch (demoState)
+  if (!demoRunning || ServoCalibration::isActive()) return;
+  const unsigned long now = millis();
+  const uint32_t elapsed = now-lastWaveUpdate;
+  if (elapsed < WAVE_UPDATE_MS) return;
+  lastWaveUpdate = now;
+  if (waveReady) wavePhaseMs = (wavePhaseMs+elapsed%WAVE_PERIOD_MS)%WAVE_PERIOD_MS;
+  const float phase = 2.0f*PI*float(wavePhaseMs)/WAVE_PERIOD_MS;
+  wavePose = {PlatformControl::heightMm(), WAVE_ROLL_AMPLITUDE_DEG*sinf(phase), WAVE_PITCH_AMPLITUDE_DEG*cosf(phase), false};
+  waitingCalibration = false;
+  if (!Kinematics::compute_kinematics(wavePose.z, wavePose.roll, wavePose.pitch))
   {
-    case DEMO_MOVE_TO_MAX:
-      if (updateTransition())
-      {
-        initialiseMainSweep();
-        demoState = DEMO_MAIN_SWEEP;
-      }
-      break;
-
-    case DEMO_MAIN_SWEEP:
-      updateMainSweep();
-      break;
-
-    case DEMO_MOVE_TO_WAVE_CENTER:
-      if (updateTransition())
-      {
-        initialiseWave();
-        demoState = DEMO_WAVE;
-      }
-      break;
-
-    case DEMO_WAVE:
-      updateWave();
-      break;
-
-    case DEMO_RETURN_TO_WAVE_CENTER:
-      if (updateTransition())
-      {
-        demoState = DEMO_MOVE_TO_MAX;
-        startTransition(SERVO1_MAX_US, SERVO2_MAX_US, SERVO3_MAX_US);
-      }
-      break;
+    waveStatus = "Pose inatteignable: PWM maintenu (voir erreur IK en serie)";
+    static unsigned long lastErrorLog = 0;
+    if (now-lastErrorLog >= 1000) {
+      Serial.printf("IK erreur=%d bras=%d z=%.2f roll=%.2f pitch=%.2f\n", int(Kinematics::lastError), Kinematics::failedLeg, wavePose.z, wavePose.roll, wavePose.pitch);
+      lastErrorLog = now;
+    }
+    return;
+  }
+  const float angles[3] = {float(Kinematics::q1), float(Kinematics::q2), float(Kinematics::q3)};
+  int targets[3];
+  for (int i=0;i<3;++i)
+  {
+    const auto calibration = ServoCalibration::getCalibration(i+1);
+    if (!calibration.valid || calibration.joint<1 || calibration.joint>3
+        || !ServoCalibration::angleToTicks(calibration, angles[calibration.joint-1], targets[i]))
+    {
+      waitingCalibration = true;
+      waveStatus = "Calibration manquante ou angle hors plage: PWM maintenu";
+      return;
+    }
+  }
+  if (!waveReady)
+  {
+    waveReady = true;
+    waveStart = now;
+    for (int i=0;i<3;++i) waveStartTicks[i] = rawTicks[i];
+    Serial.println("Vague plateforme active: roll/pitch +/-5 deg, periode 4.5 s.");
+  }
+  wavePose.valid = true;
+  waveStatus = "Vague plateforme active (roll/pitch via IK)";
+  // Ease into the wave from the last commanded positions on start/resume.
+  const unsigned long rampElapsed = now-waveStart;
+  float blend = rampElapsed >= WAVE_START_MS ? 1.0f : float(rampElapsed)/WAVE_START_MS;
+  blend = blend*blend*(3-2*blend);
+  for (int i=0;i<3;++i)
+  {
+    const int ticks = lroundf(waveStartTicks[i]+blend*(targets[i]-waveStartTicks[i]));
+    setServoTicks(i+1, ticks);
   }
 }
 } // namespace ServoControl

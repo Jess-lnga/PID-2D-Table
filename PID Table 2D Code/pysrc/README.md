@@ -21,6 +21,12 @@ python pysrc/kinematics_viewer.py --z-max 70 --tilt-max 30
 
 Le modèle ne vérifie pas les collisions ni les limites d'articulation des rotules. Il n'envoie aucune commande au matériel. L'échelle de la vue est identique dans les trois directions et reste fixe pendant la manipulation.
 
+### Fluidité
+
+La scène utilise des objets persistants et un fond graphique mis en cache. Les mouvements rapides des curseurs sont regroupés : la dernière consigne remplace les étapes intermédiaires en attente. La cible est de 30 mises à jour/s au maximum, selon la vitesse de l'ordinateur ; le panneau numérique se rafraîchit environ 8 fois/s pendant le glissement et affiche la valeur finale au relâchement. Les changements de caméra, de taille de fenêtre ou de paramètres recréent le fond en cache.
+
+La fréquence maximale se règle avec `--fps 20`. En cas de problème de rendu avec un backend graphique, `--no-blit` active le rendu complet de compatibilité. Les équations et les paramètres mécaniques sont inchangés.
+
 Tests :
 
 ```powershell
