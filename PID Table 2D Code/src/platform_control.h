@@ -3,7 +3,7 @@
 #include "imu_data.h"
 namespace PlatformControl
 {
-constexpr float IMU_Z_MM = 0.0f; // Platform center height = h0 + this value.
+constexpr float IMU_Z_MM = 25.0f; // Platform center height = h0 + this value.
 constexpr float IMU_ROLL_SIGN = 1.0f;
 constexpr float IMU_PITCH_SIGN = 1.0f;
 constexpr unsigned long CONTROL_PERIOD_MS = 20;

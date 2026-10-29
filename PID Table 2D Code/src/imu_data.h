@@ -9,6 +9,7 @@ struct State
   bool enabled = false;
   bool connected = false;
   bool calibrated = false;
+  bool calibrationSaved = false; // Current reference persisted successfully in NVS.
   bool calibrationActive = false;
   bool calibrationFailed = false;
   bool hasData = false;

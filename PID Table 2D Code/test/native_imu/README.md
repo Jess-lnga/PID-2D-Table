@@ -19,3 +19,14 @@ g++ -std=c++17 -Itest/native_imu test/native_imu/test_imu.cpp -o /tmp/pid-imu-te
 These are host tests only; real sensor timing, noise, power and wiring still require hardware validation.
 
 New regression cases cover modest stationary gyro noise, preserving 190 accepted samples through a single severe spike, rejecting sustained movement and excessive window variance, and detecting slowly changing gravity.
+
+Persistence cases simulate a power cycle, restore gyro biases and roll/pitch references,
+verify no writes during normal sampling, preserve the saved reference after a failed
+recalibration, and reject corrupt/truncated records, unsupported versions and a different
+MPU model. NVS open/write failures are also covered.
+
+On hardware, the first successful manual calibration saves the reference in the
+`imu-cal` NVS namespace. Subsequent boots reuse it; Calibrate replaces it only after
+a successful measurement. The web diagnostics show whether the current reference
+was saved. If saving fails, the calibration remains usable for the current session.
+The default platform height is 25 mm above h0. Verify retention with a power cycle.

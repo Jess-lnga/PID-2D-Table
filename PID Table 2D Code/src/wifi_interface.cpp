@@ -168,7 +168,7 @@ ESP32 Servo Controller
 
 <div class="servo-box">
 <h2>Hauteur de la plateforme</h2>
-<label>z au-dessus de h0 (mm) : <input id="heightInput" type="number" min="0" step="1" value="0"></label>
+<label>z au-dessus de h0 (mm) : <input id="heightInput" type="number" min="0" step="1" value="25"></label>
 <button id="heightButton" onclick="setHeight()">Appliquer</button>
 <p id="heightFeedback" role="status"></p>
 </div>
@@ -229,6 +229,7 @@ function updateImuDisplay(data)
     "Interrupteur GPIO 32 : " + (data.imuEnabled ? "ON" : "OFF"),
     "MPU connecté : " + (data.imuConnected ? "oui" : "non") + " | Adresse : " + hex(data.imuAddress) + " | WHO_AM_I : " + hex(data.imuDeviceId),
     "Calibration : " + calibration + " | Référence valide : " + (data.imuCalibrated ? "oui" : "non"),
+    "Référence enregistrée pour les prochains démarrages : " + (data.imuCalibrationSaved ? "oui" : "non"),
     "Progression : " + data.imuCalibrationSamples + "/200 échantillons | Échecs de cette tentative : " + data.imuCalibrationRestarts,
     "Données valides : " + (data.imuHasData ? "oui" : "non") + " | Échantillons lus : " + data.imuSamples + " | Âge : " + (data.imuSamples ? data.imuAgeMs + " ms" : "aucune mesure"),
     "Accélération X / Y / Z (g) : " + vector(data.imuAccelG),
@@ -357,6 +358,7 @@ void handleState()
 
   json += ",\"imuCalibrationActive\":"; json += imuState.calibrationActive ? "true" : "false";
   json += ",\"imuCalibrationFailed\":"; json += imuState.calibrationFailed ? "true" : "false";
+  json += ",\"imuCalibrationSaved\":"; json += imuState.calibrationSaved ? "true" : "false";
   json += ",\"imuCalibrationSamples\":" + String(imuState.calibrationSamples);
   json += ",\"imuDiagnostic\":\"" + String(imuState.diagnostic) + "\"";
   json += ",\"imuSamples\":" + String(imuState.samples);

@@ -14,6 +14,7 @@ void tick(unsigned count=1) {
   for(unsigned i=0;i<count;++i) {fakeUs+=10000;ImuData::update();}
 }
 void initialize() {
+  fakeNvs.clear(); failNvsOpen=failNvsWrite=false;
   Wire=WireStub{};Wire.regs[0x75]=0x70;
   word(0x3F,16384);word(0x43,655); // 1 g and a stationary 5 deg/s gyro bias.
   ImuData::state=ImuData::State{};
@@ -47,6 +48,18 @@ int main() {
   tick(200);s=ImuData::getState();
   assert(s.calibrated && std::fabs(s.rollZeroDeg-6.6f)<0.02f && std::fabs(s.pitchZeroDeg-22.8f)<0.02f);
   assert(std::fabs(s.rollDeg)<0.02f && std::fabs(s.pitchDeg)<0.02f);
+  // Simulated power cycle restores all five values without requesting calibration.
+  const auto stored=fakeNvs;
+  const unsigned writes=nvsWrites;
+  ImuData::begin();ImuData::update();tick(200);
+  s=ImuData::getState();
+  assert(s.calibrated && s.calibrationSaved && !s.calibrationActive);
+  assert(std::fabs(s.rollZeroDeg-6.6f)<0.02f && std::fabs(s.pitchZeroDeg-22.8f)<0.02f);
+  assert(std::fabs(s.gyroBiasDps[0]-5)<0.001f && std::fabs(s.rollDeg)<0.02f);
+  assert(nvsWrites==writes); // No flash writes during boot or normal sampling.
+  assert(ImuData::calibrate());word(0x43,6000);tick(20);
+  assert(ImuData::getState().calibrated && fakeNvs==stored);
+  word(0x43,655);
   // A later calibration must replace the reference rather than add to it.
   assert(ImuData::calibrate());
   word(0x3B,0);word(0x3D,0);word(0x3F,16384);tick(200);
@@ -110,5 +123,24 @@ int main() {
   assert(!ImuData::getState().connected);
   assert(!ImuData::calibrate());
   assert(std::strstr(ImuData::getState().diagnostic,"Configuration"));
+  // Bad storage, wrong schema/device and unavailable NVS require calibration.
+  initialize();tick(200);const auto valid=fakeNvs;
+  for(int scenario=0;scenario<5;++scenario) {
+    fakeNvs=valid;
+    if(scenario==0) fakeNvs.back()^=1;
+    if(scenario==1) fakeNvs.pop_back();
+    if(scenario==2) {
+      auto* record=reinterpret_cast<ImuData::CalibrationStorage*>(fakeNvs.data());
+      record->version=2;record->checksum=ImuData::calibrationChecksum(*record);
+    }
+    if(scenario==3) Wire.regs[0x75]=0x71;
+    failNvsOpen=scenario==4;
+    ImuData::begin();ImuData::update();tick();
+    assert(!ImuData::getState().calibrated && !ImuData::getState().calibrationActive);
+    Wire.regs[0x75]=0x70;
+  }
+  initialize();failNvsWrite=true;tick(200);
+  assert(ImuData::getState().calibrated && !ImuData::getState().calibrationSaved && fakeNvs.empty());
+  ImuData::begin();ImuData::update();tick();assert(!ImuData::getState().calibrated);
   puts("Native MPU tests passed: bias, progress, motion, invalid data, DATA_RDY, I2C failures, reconnect and switch.");
 }

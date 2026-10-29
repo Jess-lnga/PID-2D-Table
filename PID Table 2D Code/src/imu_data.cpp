@@ -1,6 +1,8 @@
 #include "imu_data.h"
 #include <Wire.h>
 #include <math.h>
+#include <Preferences.h>
+#include <stddef.h>
 
 namespace ImuData
 {
@@ -41,6 +43,62 @@ bool previousSample = false;
 bool previousCalibrationValid = false;
 unsigned long diagnosticMs = 0;
 uint32_t attitudeUs = 0;
+
+// One versioned NVS blob: biases and reference must always be restored together.
+struct CalibrationStorage
+{
+  uint32_t magic;
+  uint16_t version;
+  uint8_t deviceId;
+  uint8_t reserved;
+  float gyroBias[3];
+  float rollZero, pitchZero;
+  uint32_t checksum;
+};
+uint32_t calibrationChecksum(const CalibrationStorage& record)
+{
+  uint32_t hash = 2166136261u;
+  const auto* bytes = reinterpret_cast<const uint8_t*>(&record);
+  for (size_t i = 0; i < offsetof(CalibrationStorage, checksum); ++i)
+    hash = (hash ^ bytes[i]) * 16777619u;
+  return hash;
+}
+void loadCalibration()
+{
+  Preferences nvs;
+  if (!nvs.begin("imu-cal", true)) return;
+  CalibrationStorage record{};
+  const bool loaded = nvs.getBytesLength("record") == sizeof(record)
+    && nvs.getBytes("record", &record, sizeof(record)) == sizeof(record);
+  nvs.end();
+  if (!loaded || record.magic != 0x494D5543 || record.version != 1
+      || record.deviceId != state.deviceId || record.checksum != calibrationChecksum(record)) return;
+  for (float value : record.gyroBias)
+    if (!isfinite(value) || fabsf(value) > 20.0f) return;
+  if (!isfinite(record.rollZero) || fabsf(record.rollZero) > 180.0f
+      || !isfinite(record.pitchZero) || fabsf(record.pitchZero) > 90.0f) return;
+  for (int i = 0; i < 3; ++i) state.gyroBiasDps[i] = bias[i] = record.gyroBias[i];
+  state.rollZeroDeg = record.rollZero;
+  state.pitchZeroDeg = record.pitchZero;
+  state.calibrated = state.calibrationSaved = true;
+  Serial.println("Calibration IMU restauree depuis NVS.");
+}
+bool saveCalibration()
+{
+  CalibrationStorage record{};
+  record.magic = 0x494D5543;
+  record.version = 1;
+  record.deviceId = state.deviceId;
+  for (int i = 0; i < 3; ++i) record.gyroBias[i] = bias[i];
+  record.rollZero = state.rollZeroDeg;
+  record.pitchZero = state.pitchZeroDeg;
+  record.checksum = calibrationChecksum(record);
+  Preferences nvs;
+  if (!nvs.begin("imu-cal", false)) return false;
+  const bool saved = nvs.putBytes("record", &record, sizeof(record)) == sizeof(record);
+  nvs.end();
+  return saved;
+}
 
 void reportI2cError(uint8_t reg, uint8_t error)
 {
@@ -171,8 +229,10 @@ bool connectSensor()
     }
     if (!ok) continue;
     state.deviceId = id;
+    if (!state.calibrated) loadCalibration();
     state.diagnostic = state.calibrated ? "Calibration conservee" : "Cliquer sur Calibrate";
-    Serial.printf("MPU detecte: adresse 0x%02X, WHO_AM_I 0x%02X. Calibration uniquement manuelle.\n", address, id);
+    Serial.printf("MPU detecte: adresse 0x%02X, WHO_AM_I 0x%02X. Reference %s.\n",
+      address, id, state.calibrated ? "valide" : "a calibrer manuellement");
     failedFrames = state.i2cConsecutiveFailures = 0;
     sampleUs = micros();
     lastFrameMs = millis();
@@ -231,9 +291,9 @@ void updateAttitude(float ax, float ay, float az, float gx, float gy, float gz, 
 void begin()
 {
   state = State{};
-  // Boot and reconnection must wait for an explicit Calibrate button request.
+  // Restore only after identifying the sensor; otherwise require manual calibration.
   state.calibrationActive = false;
-  Serial.println("MPU: calibration MANUELLE uniquement (bouton Calibrate).");
+  Serial.println("MPU: restauration NVS ou premiere calibration manuelle.");
   previousCalibrationValid = false;
   resetCalibration();
   for (int i=0;i<3;++i) bias[i]=0;
@@ -387,6 +447,9 @@ void update()
           state.calibrated = true;
           state.calibrationActive = false;
           state.calibrationFailed = false;
+          state.calibrationSaved = saveCalibration();
+          Serial.println(state.calibrationSaved ? "Calibration IMU enregistree en NVS."
+            : "Echec sauvegarde IMU: calibration valable uniquement pour cette session.");
           Serial.printf("Zero manipulation: roll=%.3f pitch=%.3f deg\n", state.rollZeroDeg, state.pitchZeroDeg);
           attitudeInitialized = false;
           // Start from the averaged gravity reference, not the last noisy frame.
