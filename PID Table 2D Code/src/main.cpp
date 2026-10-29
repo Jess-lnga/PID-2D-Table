@@ -5,6 +5,7 @@
 #include "servo_calibration.h"
 #include "platform_control.h"
 #include "runtime_lock.h"
+#include "tch_screen.h"
 
 void setup()
 {
@@ -15,6 +16,7 @@ void setup()
   ServoControl::begin();
   ServoCalibration::begin();
   ImuData::begin();
+  TchScreen::begin();
   WifiInterface::begin();
 }
 
@@ -23,6 +25,7 @@ void loop()
   {
     RuntimeLock::Guard guard;
     ImuData::update();
+    TchScreen::update();
     ServoCalibration::update();
     PlatformControl::update(ImuData::getState());
   }

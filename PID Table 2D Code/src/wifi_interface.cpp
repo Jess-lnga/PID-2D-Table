@@ -10,6 +10,7 @@
 #include "servo_calibration_web.h"
 #include "platform_control.h"
 #include "runtime_lock.h"
+#include "tch_screen.h"
 #include <errno.h>
 
 namespace WifiInterface
@@ -123,6 +124,8 @@ button:disabled { cursor: default; opacity: .5; }
 .top { background: #88d4ab; transform: rotateX(90deg) translateZ(60px); }
 .bottom { background: #88d4ab; transform: rotateX(-90deg) translateZ(60px); }
 .viewer.inactive { opacity: .3; }
+.touch-area { position:relative; width:100%; aspect-ratio:1; background:linear-gradient(90deg,transparent 49.7%,#cbd5e1 50%,transparent 50.3%),linear-gradient(transparent 49.7%,#cbd5e1 50%,transparent 50.3%),#f4f6f8; border:2px solid #64748b; box-sizing:border-box; }
+.touch-ball { position:absolute; width:18px; height:18px; border-radius:50%; background:#e85d25; transform:translate(-50%,-50%); box-shadow:0 2px 5px #0004; }
 @media (max-width: 520px)
 {
   .imu-grid
@@ -143,6 +146,18 @@ button:disabled { cursor: default; opacity: .5; }
 
 <div class="subtitle">
 ESP32 Servo Controller
+</div>
+
+<div class="servo-box">
+<h2>Position de la balle</h2>
+<p id="touchStatus" role="status">Connexion à l’ESP32…</p>
+<div class="touch-area" role="img" aria-label="Position sur la surface tactile, X vers la droite, Y vers le bas">
+<div id="touchBall" class="touch-ball" hidden></div>
+</div>
+<p id="touchCoordinates">X : — | Y : —</p>
+<p id="touchRaw" class="imu-note"></p>
+<p id="touchContact" class="imu-note"></p>
+<p class="imu-note">X : couche 2–4, vers la droite. Y : couche 1–3, vers le bas. Position indicative avant calibration des limites. La balle doit exercer une pression suffisante pour établir un contact.</p>
 </div>
 
 <div class="servo-box">
@@ -180,6 +195,21 @@ ESP32 Servo Controller
 
 let calibrationRequestPending = false;
 let latestImuState = null;
+
+function updateTouchDisplay(touch) {
+  const fresh = touch && touch.samples > 0 && touch.ageMs < 250;
+  document.getElementById('touchContact').textContent = fresh ? 'Test contact LOW / HIGH : GPIO13 = ' + touch.contactLow13 + ' / ' + touch.contactHigh13 + ' ; GPIO34 = ' + touch.contactLow34 + ' / ' + touch.contactHigh34 : '';
+  const present = fresh && touch.present;
+  const ball = document.getElementById('touchBall');
+  ball.hidden = !present;
+  document.getElementById('touchStatus').textContent = !fresh ? 'Mesure tactile indisponible' : present ? 'Contact détecté' : 'Aucune balle détectée';
+  document.getElementById('touchCoordinates').textContent = present ? 'X : ' + (touch.x*100).toFixed(1) + ' % | Y : ' + (touch.y*100).toFixed(1) + ' %' : 'X : — | Y : —';
+  document.getElementById('touchRaw').textContent = present ? 'ADC brut : axe 1–3 = ' + touch.rawY + ' | axe 2–4 = ' + touch.rawX : '';
+  if (present) {
+    ball.style.left = (touch.x*100) + '%';
+    ball.style.top = (touch.y*100) + '%';
+  }
+}
 
 function updateCalibrateButton()
 {
@@ -279,17 +309,19 @@ async function updateState()
     const data = await response.json();
     if (document.activeElement!==document.getElementById('heightInput')) document.getElementById('heightInput').value=data.heightMm;
     updateImuDisplay(data);
+    updateTouchDisplay(data.touch);
     renderServoCalibration(data.servoCalibration);
   }
   catch (error)
   {
     calDisableCommands(true);
     latestImuState = null;
+    updateTouchDisplay(null);
     updateCalibrateButton();
     document.getElementById("viewer").classList.add("inactive");
     document.getElementById("imuStatus").textContent = "Connexion web interrompue : " + error.message + " (dernières mesures conservées à l’écran)";
   }
-  finally { clearTimeout(timeout); setTimeout(updateState, calState && calState.menuActive ? 200 : 250); }
+  finally { clearTimeout(timeout); setTimeout(updateState, calState && calState.menuActive ? 200 : 100); }
 }
 window.onload = updateState;
 
@@ -385,6 +417,15 @@ void handleState()
   }
   json += ",\"heightMm\":" + String(PlatformControl::heightMm(), 3);
   json += ",\"servoCalibration\":" + ServoCalibrationWeb::stateJson();
+  const auto touch = TchScreen::getState();
+  json += ",\"touch\":{\"present\":"; json += touch.present ? "true" : "false";
+  json += ",\"contactLow13\":" + String(touch.contactLow13) + ",\"contactHigh13\":" + String(touch.contactHigh13);
+  json += ",\"contactLow34\":" + String(touch.contactLow34) + ",\"contactHigh34\":" + String(touch.contactHigh34);
+  json += ",\"rawX\":" + String(touch.rawX) + ",\"rawY\":" + String(touch.rawY);
+  json += ",\"x\":" + String(touch.x, 4) + ",\"y\":" + String(touch.y, 4);
+  json += ",\"samples\":" + String(touch.samples);
+  json += ",\"ageMs\":" + String(touch.samples ? millis() - touch.lastUpdateMs : 0);
+  json += "}";
   json += "}";
 
   server.sendHeader("Cache-Control", "no-store");
