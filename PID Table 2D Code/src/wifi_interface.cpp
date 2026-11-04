@@ -124,7 +124,7 @@ button:disabled { cursor: default; opacity: .5; }
 .top { background: #88d4ab; transform: rotateX(90deg) translateZ(60px); }
 .bottom { background: #88d4ab; transform: rotateX(-90deg) translateZ(60px); }
 .viewer.inactive { opacity: .3; }
-.touch-area { position:relative; width:100%; aspect-ratio:1; background:linear-gradient(90deg,transparent 49.7%,#cbd5e1 50%,transparent 50.3%),linear-gradient(transparent 49.7%,#cbd5e1 50%,transparent 50.3%),#f4f6f8; border:2px solid #64748b; box-sizing:border-box; }
+.touch-area { position:relative; width:100%; aspect-ratio:260 / 198; background:linear-gradient(90deg,transparent 49.7%,#cbd5e1 50%,transparent 50.3%),linear-gradient(transparent 49.7%,#cbd5e1 50%,transparent 50.3%),#f4f6f8; border:2px solid #64748b; box-sizing:border-box; }
 .touch-ball { position:absolute; width:18px; height:18px; border-radius:50%; background:#e85d25; transform:translate(-50%,-50%); box-shadow:0 2px 5px #0004; }
 @media (max-width: 520px)
 {
@@ -150,6 +150,7 @@ ESP32 Servo Controller
 
 <div class="servo-box">
 <h2>Position de la balle</h2>
+<p class="imu-note">Surface : 26 cm (X) × 19,8 cm (Y)</p>
 <p id="touchStatus" role="status">Connexion à l’ESP32…</p>
 <div class="touch-area" role="img" aria-label="Position sur la surface tactile, X vers la droite, Y vers le bas">
 <div id="touchBall" class="touch-ball" hidden></div>
@@ -188,6 +189,27 @@ ESP32 Servo Controller
 <p id="heightFeedback" role="status"></p>
 </div>
 
+<div class="servo-box">
+<h2>Pilotage sans IMU</h2>
+<p id="platformStatus" role="status">Connexion à l’ESP32…</p>
+<fieldset id="platformControls" disabled style="border:0;padding:0">
+<label for="platformMode">Mode de fonctionnement</label>
+<select id="platformMode" onchange="sendPlatformCommand()">
+<option value="wave">Mouvement par défaut : vague ±5° (4,5 s)</option>
+<option value="manual">Manuel : pitch et roll</option>
+</select>
+<div id="manualControls" hidden>
+<p><label for="manualRoll">Roll : <output id="manualRollValue">0.0°</output></label><br>
+<input id="manualRoll" type="range" min="-10" max="10" step="0.1" value="0" style="width:90%" oninput="previewManualAngles()" onchange="sendPlatformCommand()"></p>
+<p><label for="manualPitch">Pitch : <output id="manualPitchValue">0.0°</output></label><br>
+<input id="manualPitch" type="range" min="-10" max="10" step="0.1" value="0" style="width:90%" oninput="previewManualAngles()" onchange="sendPlatformCommand()"></p>
+<button type="button" onclick="resetManualAngles()">Remettre à plat</button>
+<p class="imu-note">Les angles sont envoyés au relâchement des sliders. Une pose hors plage est refusée.</p>
+</div>
+</fieldset>
+<p id="platformFeedback" role="status"></p>
+</div>
+
 </div>
 <!--SERVO_CAL_MENU-->
 <script>
@@ -195,6 +217,50 @@ ESP32 Servo Controller
 
 let calibrationRequestPending = false;
 let latestImuState = null;
+let platformPending = false;
+
+function previewManualAngles() {
+  for (const axis of ['Roll','Pitch']) document.getElementById('manual'+axis+'Value').textContent = Number(document.getElementById('manual'+axis).value).toFixed(1)+'°';
+}
+function renderPlatform(data) {
+  const p = data && data.platform;
+  const blocked = !p || data.imuEnabled || data.servoCalibration.menuActive;
+  document.getElementById('platformControls').disabled = blocked || platformPending;
+  document.getElementById('platformStatus').textContent = !p ? 'Connexion web interrompue' : data.imuEnabled ? 'IMU prioritaire : désactiver l’interrupteur GPIO 32 pour utiliser ce menu.' : data.servoCalibration.menuActive ? 'Calibration servos prioritaire.' : p.message;
+  if (!p || platformPending) return;
+  document.getElementById('platformMode').value = p.mode;
+  document.getElementById('manualControls').hidden = p.mode !== 'manual';
+  for (const axis of ['Roll','Pitch']) {
+    const input = document.getElementById('manual'+axis);
+    input.min = -p.manualLimit; input.max = p.manualLimit;
+    if (document.activeElement !== input) input.value = p['manual'+axis];
+  }
+  previewManualAngles();
+}
+async function sendPlatformCommand() {
+  if (platformPending || document.getElementById('platformControls').disabled) return;
+  const mode = document.getElementById('platformMode').value;
+  document.getElementById('manualControls').hidden = mode !== 'manual';
+  const body = new URLSearchParams({mode,roll:document.getElementById('manualRoll').value,pitch:document.getElementById('manualPitch').value});
+  platformPending = true;
+  document.getElementById('platformControls').disabled = true;
+  const controller = new AbortController(), timeout = setTimeout(()=>controller.abort(),3000);
+  try {
+    const response = await fetch('/platform/control',{method:'POST',body,signal:controller.signal});
+    const message = await response.text();
+    document.getElementById('platformFeedback').textContent = message;
+    if (!response.ok) document.activeElement.blur();
+  } catch(error) {
+    document.getElementById('platformFeedback').textContent = 'Commande non confirmée : connexion interrompue. Vérifier l’état affiché après reconnexion.';
+  } finally { clearTimeout(timeout); platformPending = false; }
+  // Controls are re-enabled by the next successful state response.
+}
+function resetManualAngles() {
+  document.getElementById('manualRoll').value = 0;
+  document.getElementById('manualPitch').value = 0;
+  previewManualAngles();
+  sendPlatformCommand();
+}
 
 function updateTouchDisplay(touch) {
   const fresh = touch && touch.samples > 0 && touch.ageMs < 250;
@@ -202,7 +268,9 @@ function updateTouchDisplay(touch) {
   const present = fresh && touch.present;
   const ball = document.getElementById('touchBall');
   ball.hidden = !present;
-  document.getElementById('touchStatus').textContent = !fresh ? 'Mesure tactile indisponible' : present ? 'Contact détecté' : 'Aucune balle détectée';
+  const held = present && !touch.measurementValid;
+  ball.style.opacity = held ? '0.4' : '1';
+  document.getElementById('touchStatus').textContent = !fresh ? 'Mesure tactile indisponible' : held ? 'Contact interrompu : dernière position conservée (' + touch.positionAgeMs + ' ms)' : present ? 'Contact détecté' : 'Aucune balle détectée';
   document.getElementById('touchCoordinates').textContent = present ? 'X : ' + (touch.x*100).toFixed(1) + ' % | Y : ' + (touch.y*100).toFixed(1) + ' %' : 'X : — | Y : —';
   document.getElementById('touchRaw').textContent = present ? 'ADC brut : axe 1–3 = ' + touch.rawY + ' | axe 2–4 = ' + touch.rawX : '';
   if (present) {
@@ -311,10 +379,12 @@ async function updateState()
     updateImuDisplay(data);
     updateTouchDisplay(data.touch);
     renderServoCalibration(data.servoCalibration);
+    renderPlatform(data);
   }
   catch (error)
   {
     calDisableCommands(true);
+    renderPlatform(null);
     latestImuState = null;
     updateTouchDisplay(null);
     updateCalibrateButton();
@@ -416,9 +486,21 @@ void handleState()
     json += "]";
   }
   json += ",\"heightMm\":" + String(PlatformControl::heightMm(), 3);
+  const auto platform = PlatformControl::getState();
+  json += ",\"platform\":{\"mode\":\"";
+  json += platform.nonImuMode == PlatformControl::NonImuMode::Manual ? "manual" : "wave";
+  json += "\",\"manualRoll\":" + String(platform.manualRoll, 2);
+  json += ",\"manualPitch\":" + String(platform.manualPitch, 2);
+  json += ",\"manualLimit\":" + String(PlatformControl::MANUAL_LIMIT_DEG, 1);
+  json += ",\"applied\":"; json += platform.applied ? "true" : "false";
+  json += ",\"message\":\"" + String(platform.message) + "\"}";
   json += ",\"servoCalibration\":" + ServoCalibrationWeb::stateJson();
   const auto touch = TchScreen::getState();
   json += ",\"touch\":{\"present\":"; json += touch.present ? "true" : "false";
+  json += ",\"measurementValid\":"; json += touch.measurementValid ? "true" : "false";
+  json += ",\"validSamples\":" + String(touch.validSamples);
+  json += ",\"positionAgeMs\":";
+  json += touch.validSamples ? String(millis() - touch.lastValidMs) : "null";
   json += ",\"contactLow13\":" + String(touch.contactLow13) + ",\"contactHigh13\":" + String(touch.contactHigh13);
   json += ",\"contactLow34\":" + String(touch.contactLow34) + ",\"contactHigh34\":" + String(touch.contactHigh34);
   json += ",\"rawX\":" + String(touch.rawX) + ",\"rawY\":" + String(touch.rawY);
@@ -453,6 +535,31 @@ void handleHeight()
   if (!errno && end!=text.c_str() && *end==0) { RuntimeLock::Guard guard; ok=PlatformControl::setHeightMm(z); }
   server.send(ok?200:409,"text/plain; charset=utf-8",ok?"Hauteur mise à jour.":"Hauteur refusée : pose impossible, calibration indisponible ou menu servo actif.");
 }
+bool readFloatArg(const char* name, float& value)
+{
+  if (!server.hasArg(name)) return false;
+  const String text = server.arg(name);
+  char* end = nullptr; errno = 0;
+  value = strtof(text.c_str(), &end);
+  return !errno && end != text.c_str() && *end == 0 && isfinite(value);
+}
+void handlePlatformControl()
+{
+  server.sendHeader("Cache-Control", "no-store");
+  const String mode = server.arg("mode");
+  float roll, pitch;
+  if ((mode != "wave" && mode != "manual") || !readFloatArg("roll",roll) || !readFloatArg("pitch",pitch)) {
+    server.send(400,"text/plain; charset=utf-8","Mode ou angles invalides.");
+    return;
+  }
+  bool ok = false;
+  {
+    RuntimeLock::Guard guard;
+    if (!ImuData::getState().enabled)
+      ok = PlatformControl::setNonImuMode(mode == "manual" ? PlatformControl::NonImuMode::Manual : PlatformControl::NonImuMode::Wave, roll, pitch);
+  }
+  server.send(ok?200:409,"text/plain; charset=utf-8",ok?"Commande enregistrée.":"Commande refusée : IMU ou calibration active, angles hors limites ou pose inaccessible.");
+}
 void webTask(void*)
 {
   for (;;) { server.handleClient(); vTaskDelay(1); }
@@ -477,6 +584,7 @@ void begin()
   server.on("/", handleRoot);
   server.on("/state", handleState);
   server.on("/platform/height", HTTP_POST, handleHeight);
+  server.on("/platform/control", HTTP_POST, handlePlatformControl);
   ServoCalibrationWeb::registerRoutes(server);
   server.on("/imu/calibrate", HTTP_POST, handleCalibrate);
 

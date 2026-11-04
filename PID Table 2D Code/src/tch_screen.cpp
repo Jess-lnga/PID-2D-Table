@@ -42,15 +42,19 @@ int readFiltered(int pin) {
   return values[2];
 }
 void finish(bool contact) {
+  const unsigned long now = millis();
   contactFrames = contact ? (contactFrames < 2 ? contactFrames + 1 : 2) : 0;
-  state.present = contactFrames >= 2;
-  if (state.present) {
+  state.measurementValid = contact && (state.present || contactFrames >= 2);
+  if (state.measurementValid) {
+    state.present = true;
     state.rawX = rawX; state.rawY = rawY;
     state.x = constrain(float(rawX - X_MIN) / (X_MAX - X_MIN), 0.0f, 1.0f);
     state.y = constrain(float(rawY - Y_MIN) / (Y_MAX - Y_MIN), 0.0f, 1.0f);
+    state.lastValidMs = now;
+    ++state.validSamples;
   }
   ++state.samples;
-  state.lastUpdateMs = millis();
+  state.lastUpdateMs = now;
   releasePanel();
   phase = Phase::Idle;
 }
@@ -66,6 +70,11 @@ void begin() {
   startedUs = micros() - PERIOD_US;
 }
 void update() {
+  if (state.present && millis() - state.lastValidMs >= CONTACT_HOLD_MS) {
+    state.present = false;
+    state.measurementValid = false;
+    contactFrames = 0;
+  }
   const uint32_t now = micros();
   if (phase == Phase::Idle) {
     if (uint32_t(now - startedUs) < PERIOD_US) return;

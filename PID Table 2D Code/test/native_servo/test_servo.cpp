@@ -153,6 +153,36 @@ int main() {
   PlatformControl::update(imu);assert(PlatformControl::getState().ikError==ikError);
   imu.rollDeg=std::numeric_limits<float>::quiet_NaN();PlatformControl::update(imu);assert(pwmWrites==writes);
   imu.enabled=false;PlatformControl::update(imu);assert(ServoControl::isDemoRunning());ServoControl::stopDemo();
+  // Manual mode shares IK/calibration checks and yields to IMU/calibration.
+  assert(PlatformControl::setNonImuMode(PlatformControl::NonImuMode::Manual,2,-3));
+  writes=pwmWrites; fakeMs+=20; PlatformControl::update(imu);
+  assert(!ServoControl::isDemoRunning() && PlatformControl::getState().applied);
+  assert(PlatformControl::getState().roll==2 && PlatformControl::getState().pitch==-3);
+  assert(pwmWrites==writes+3);
+  writes=pwmWrites; fakeMs+=20; PlatformControl::update(imu);assert(pwmWrites==writes);
+  assert(!PlatformControl::setNonImuMode(PlatformControl::NonImuMode::Manual,11,0));
+  assert(!PlatformControl::setNonImuMode(PlatformControl::NonImuMode::Manual,std::numeric_limits<float>::quiet_NaN(),0));
+  assert(PlatformControl::getState().manualRoll==2 && pwmWrites==writes);
+  Kinematics::parameters.L1=1;
+  assert(!PlatformControl::setNonImuMode(PlatformControl::NonImuMode::Manual,0,0));
+  assert(PlatformControl::getState().manualRoll==2);
+  Kinematics::parameters=geometry;
+  assert(PlatformControl::setHeightMm(10));fakeMs+=20;PlatformControl::update(imu);
+  assert(PlatformControl::getState().z==10 && PlatformControl::getState().applied);
+  assert(openMenu());writes=pwmWrites;
+  assert(!PlatformControl::setNonImuMode(PlatformControl::NonImuMode::Wave,0,0));
+  fakeMs+=20;PlatformControl::update(imu);assert(pwmWrites==writes);
+  assert(closeMenu());fakeMs+=20;PlatformControl::update(imu);
+  assert(PlatformControl::getState().applied);
+  imu.enabled=true;imu.rollDeg=1;imu.pitchDeg=1;imu.samples++;imu.lastUpdateMs=fakeMs;
+  fakeMs+=20;PlatformControl::update(imu);
+  assert(PlatformControl::getState().imuMode);
+  assert(!PlatformControl::setNonImuMode(PlatformControl::NonImuMode::Wave,0,0));
+  imu.enabled=false;fakeMs+=20;PlatformControl::update(imu);
+  assert(PlatformControl::getState().applied && PlatformControl::getState().roll==2);
+  assert(PlatformControl::setNonImuMode(PlatformControl::NonImuMode::Wave,0,0));
+  fakeMs+=20;PlatformControl::update(imu);assert(ServoControl::isDemoRunning());
+  ServoControl::stopDemo();
   fakeNvs.back()^=1;begin();assert(getCalibration(1).ticks[0]==2337);
   assert(openMenu());assert(assignJoint(1,2));assert(getCalibration(1).ticks[0]==2337);
   begin();assert(getCalibration(1).joint==2&&getCalibration(1).ticks[0]==2337); // Corrupt checksum ignored.

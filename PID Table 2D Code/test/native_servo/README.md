@@ -22,3 +22,7 @@ Stages: 0 selection, 1 adjustment, 2 verification, 3 final save, 4 paused. The p
 Also verifies measured fallback curves, NVS precedence without boot-time writes, platform-pose IK/PWM agreement across multiple cycles and no PWM writes on an unreachable pose.
 
 IMU-control regression cases also cover calibrated pose-to-PWM mapping, no repeated commands for an unchanged sample, stale data, recalibration holds, servo-menu priority, impossible/non-finite poses and return to automatic mode.
+
+Manual-control regression cases cover switching from the wave, calibrated PWM
+application without redundant writes, angle limits/NaN/unreachable-pose rejection,
+height changes, calibration/IMU priority, manual resumption and return to the wave.

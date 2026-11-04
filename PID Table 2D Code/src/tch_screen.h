@@ -9,12 +9,17 @@ constexpr int P3 = 23;
 constexpr int P4 = 14;
 // Extra wire: connect GPIO34 to P2 (GPIO13). ADC2 is unavailable with Wi-Fi.
 constexpr int P2_SENSE = 34;
+// Keep an acquired ball through brief dropouts; never fabricate coordinates.
+constexpr uint32_t CONTACT_HOLD_MS = 50;
 // X endpoints: layer 2-4 at left/right. Y endpoints: layer 1-3 at top/bottom.
 // Replace these endpoints after measuring the useful area of your panel.
 constexpr int X_MIN = 0, X_MAX = 4095;
 constexpr int Y_MIN = 0, Y_MAX = 4095;
 struct State {
   bool present = false;
+  bool measurementValid = false; // Latest completed cycle produced an accepted position.
+  uint32_t validSamples = 0;
+  unsigned long lastValidMs = 0; // Age of coordinates, unlike lastUpdateMs (any cycle).
   // Latest completed pre-measurement contact test, also exposed when absent.
   int contactLow13 = 0, contactHigh13 = 0;
   int contactLow34 = 0, contactHigh34 = 0;
